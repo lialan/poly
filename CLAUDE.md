@@ -10,6 +10,7 @@ A Python-based trading platform for interacting with Polymarket prediction marke
 - **Async**: asyncio, aiohttp
 - **Testing**: pytest, pytest-asyncio
 - **Linting**: ruff, black, mypy
+- **Package Manager**: uv (fast Python package installer)
 
 ## Project Structure
 ```
@@ -67,14 +68,17 @@ poly/
 
 ## Development Commands
 ```bash
-# Setup (Mac or Ubuntu)
+# Setup (Mac or Ubuntu) - uses uv for fast package management
 ./scripts/setup.sh
 
 # Activate environment
-source venv/bin/activate
+source .venv/bin/activate
 
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies (with uv)
+uv pip install -r requirements.txt
+
+# Add a new package
+uv pip install <package>
 
 # Run tests
 pytest tests/ -v

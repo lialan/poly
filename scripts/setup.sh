@@ -1,6 +1,7 @@
 #!/bin/bash
 # Setup script for Polymarket Trading Platform
 # Compatible with macOS and Ubuntu 22.04/24.04
+# Uses uv for fast package management
 
 set -e
 
@@ -25,46 +26,38 @@ if [[ "$OS" == "unknown" ]]; then
     echo "Warning: Unrecognized OS. Proceeding with generic setup..."
 fi
 
-# Check Python version
-PYTHON_CMD=""
-for cmd in python3.12 python3.11 python3; do
-    if command -v $cmd &> /dev/null; then
-        version=$($cmd -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-        major=$(echo $version | cut -d. -f1)
-        minor=$(echo $version | cut -d. -f2)
-        if [[ $major -ge 3 && $minor -ge 11 ]]; then
-            PYTHON_CMD=$cmd
-            echo "Found Python $version at $(which $cmd)"
-            break
-        fi
-    fi
-done
-
-if [[ -z "$PYTHON_CMD" ]]; then
-    echo "Error: Python 3.11+ is required but not found."
-    echo ""
+# Check/install uv
+echo ""
+if command -v uv &> /dev/null; then
+    echo "Found uv at $(which uv)"
+    uv --version
+else
+    echo "Installing uv..."
     if [[ "$OS" == "macos" ]]; then
-        echo "Install Python with Homebrew:"
-        echo "  brew install python@3.12"
+        if command -v brew &> /dev/null; then
+            brew install uv
+        else
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            export PATH="$HOME/.local/bin:$PATH"
+        fi
     elif [[ "$OS" == "ubuntu" ]]; then
-        echo "Install Python on Ubuntu:"
-        echo "  sudo apt update"
-        echo "  sudo apt install python3.12 python3.12-venv python3-pip"
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        export PATH="$HOME/.local/bin:$PATH"
+    else
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        export PATH="$HOME/.local/bin:$PATH"
     fi
-    exit 1
+    echo "uv installed successfully"
 fi
 
-# Install system dependencies
+# Install system dependencies (for native extensions)
 echo ""
-echo "Installing system dependencies..."
+echo "Checking system dependencies..."
 if [[ "$OS" == "macos" ]]; then
-    if ! command -v brew &> /dev/null; then
-        echo "Homebrew not found. Please install from https://brew.sh"
-        exit 1
+    if command -v brew &> /dev/null; then
+        brew list openssl &>/dev/null || brew install openssl
+        brew list libffi &>/dev/null || brew install libffi
     fi
-    # Ensure we have the required tools
-    brew list openssl &>/dev/null || brew install openssl
-    brew list libffi &>/dev/null || brew install libffi
 elif [[ "$OS" == "ubuntu" ]]; then
     sudo apt-get update
     sudo apt-get install -y \
@@ -72,8 +65,6 @@ elif [[ "$OS" == "ubuntu" ]]; then
         libssl-dev \
         libffi-dev \
         python3-dev \
-        python3-pip \
-        python3-venv \
         git \
         curl
 fi
@@ -86,35 +77,26 @@ cd "$PROJECT_ROOT"
 echo ""
 echo "Project root: $PROJECT_ROOT"
 
-# Create virtual environment
-VENV_DIR="$PROJECT_ROOT/venv"
+# Create virtual environment with uv
+VENV_DIR="$PROJECT_ROOT/.venv"
 if [[ -d "$VENV_DIR" ]]; then
     echo "Virtual environment already exists at $VENV_DIR"
     read -p "Recreate it? (y/N): " recreate
     if [[ "$recreate" =~ ^[Yy]$ ]]; then
         rm -rf "$VENV_DIR"
-        $PYTHON_CMD -m venv "$VENV_DIR"
+        uv venv --python 3.12 "$VENV_DIR"
         echo "Virtual environment recreated."
     fi
 else
-    echo "Creating virtual environment..."
-    $PYTHON_CMD -m venv "$VENV_DIR"
+    echo "Creating virtual environment with uv..."
+    uv venv --python 3.12 "$VENV_DIR"
     echo "Virtual environment created at $VENV_DIR"
 fi
 
-# Activate virtual environment
-source "$VENV_DIR/bin/activate"
-echo "Virtual environment activated."
-
-# Upgrade pip
+# Install dependencies with uv
 echo ""
-echo "Upgrading pip..."
-pip install --upgrade pip setuptools wheel
-
-# Install dependencies
-echo ""
-echo "Installing Python dependencies..."
-pip install -r requirements.txt
+echo "Installing Python dependencies with uv..."
+uv pip install -r requirements.txt
 
 # Create .env file if it doesn't exist
 if [[ ! -f "$PROJECT_ROOT/.env" ]]; then
@@ -131,6 +113,7 @@ chmod +x "$PROJECT_ROOT/scripts/"*.py 2>/dev/null || true
 # Verify installation
 echo ""
 echo "Verifying installation..."
+source "$VENV_DIR/bin/activate"
 python -c "from poly import PolymarketClient, Config; print('Import successful!')"
 
 echo ""
@@ -140,7 +123,7 @@ echo "=========================================="
 echo ""
 echo "Next steps:"
 echo "  1. Activate the virtual environment:"
-echo "     source venv/bin/activate"
+echo "     source .venv/bin/activate"
 echo ""
 echo "  2. Edit .env with your Polymarket credentials"
 echo ""
@@ -149,4 +132,9 @@ echo "     python scripts/run.py"
 echo ""
 echo "  4. Run tests:"
 echo "     pytest tests/"
+echo ""
+echo "uv commands:"
+echo "  uv pip install <package>    # Install a package"
+echo "  uv pip list                 # List installed packages"
+echo "  uv pip compile              # Lock dependencies"
 echo ""
