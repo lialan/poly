@@ -66,6 +66,13 @@ poly/
 - Expected value computation
 - Async retry with exponential backoff
 
+### `gamma.py` - Gamma API (No Auth Required)
+- `fetch_event_from_url()`: Fetch event data from Polymarket URL
+- `fetch_event_by_slug()`: Fetch event by slug name
+- `search_events()`: Search events by query
+- Data models: `Event`, `SubMarket`, `OutcomeToken`
+- Parses multi-outcome markets with token IDs and prices
+
 ## Development Commands
 ```bash
 # Setup (Mac or Ubuntu) - uses uv for fast package management

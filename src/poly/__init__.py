@@ -6,6 +6,14 @@ from .client import PolymarketClient
 from .config import Config
 from .models import Market, Order, Position
 from .trading import TradingEngine
+from .gamma import (
+    Event,
+    SubMarket,
+    OutcomeToken,
+    fetch_event_by_slug,
+    fetch_event_from_url,
+    search_events,
+)
 
 __all__ = [
     "PolymarketClient",
@@ -14,4 +22,10 @@ __all__ = [
     "Order",
     "Position",
     "TradingEngine",
+    "Event",
+    "SubMarket",
+    "OutcomeToken",
+    "fetch_event_by_slug",
+    "fetch_event_from_url",
+    "search_events",
 ]
