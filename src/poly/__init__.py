@@ -20,6 +20,15 @@ from .btc_15m import (
     fetch_btc_15m_prediction,
     print_predictions,
 )
+from .binance_price import (
+    get_btc_price,
+    get_eth_price,
+    get_prices,
+    get_btc_stats,
+    get_eth_stats,
+    TickerPrice,
+    TickerStats,
+)
 
 __all__ = [
     "PolymarketClient",
@@ -38,4 +47,11 @@ __all__ = [
     "fetch_current_and_upcoming",
     "fetch_btc_15m_prediction",
     "print_predictions",
+    "get_btc_price",
+    "get_eth_price",
+    "get_prices",
+    "get_btc_stats",
+    "get_eth_stats",
+    "TickerPrice",
+    "TickerStats",
 ]

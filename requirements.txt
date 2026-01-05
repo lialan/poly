@@ -2,6 +2,9 @@
 py-clob-client>=0.18.0
 py-order-utils>=0.3.0
 
+# Binance API
+python-binance>=1.0.20
+
 # Web3 / Blockchain
 web3>=6.0.0
 eth-account>=0.10.0
