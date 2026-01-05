@@ -29,6 +29,11 @@ from .binance_price import (
     TickerPrice,
     TickerStats,
 )
+from .telegram_notifier import (
+    TelegramNotifier,
+    TelegramConfig,
+    escape_markdown,
+)
 
 __all__ = [
     "PolymarketClient",
@@ -54,4 +59,7 @@ __all__ = [
     "get_eth_stats",
     "TickerPrice",
     "TickerStats",
+    "TelegramNotifier",
+    "TelegramConfig",
+    "escape_markdown",
 ]
