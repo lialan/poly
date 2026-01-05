@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  # Production service
+  poly:
+    build:
+      context: .
+      target: production
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+    networks:
+      - poly-network
+
+  # Development service with tests
+  poly-dev:
+    build:
+      context: .
+      target: development
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
+      - ./scripts:/app/scripts:ro
+    networks:
+      - poly-network
+    profiles:
+      - dev
+
+  # Test runner
+  poly-test:
+    build:
+      context: .
+      target: development
+    command: pytest tests/ -v --cov=poly --cov-report=term-missing
+    volumes:
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
+    networks:
+      - poly-network
+    profiles:
+      - test
+
+networks:
+  poly-network:
+    driver: bridge
