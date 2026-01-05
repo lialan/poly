@@ -69,3 +69,7 @@ Thumbs.db
 *.db
 *.sqlite
 data/
+
+# Config files with secrets
+config/
+*.secrets.json

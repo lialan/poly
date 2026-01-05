@@ -45,6 +45,51 @@ class TelegramConfig:
             timezone=os.getenv("TELEGRAM_TIMEZONE", "UTC"),
         )
 
+    @classmethod
+    def from_json(cls, path: str) -> Optional["TelegramConfig"]:
+        """Load config from JSON file."""
+        import json
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            return cls(
+                bot_token=data.get("token", ""),
+                chat_id=str(data.get("chat_id", "")),
+                timezone=data.get("timezone", "UTC"),
+            )
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            return None
+
+    @classmethod
+    def load(cls, config_path: Optional[str] = None) -> Optional["TelegramConfig"]:
+        """Load config from JSON file or environment variables.
+
+        Args:
+            config_path: Path to JSON config file. If None, tries default paths.
+
+        Returns:
+            TelegramConfig or None if not configured.
+        """
+        # Try JSON config file first
+        if config_path:
+            config = cls.from_json(config_path)
+            if config:
+                return config
+
+        # Try default config paths
+        default_paths = [
+            "config/telegram.json",
+            "../config/telegram.json",
+            os.path.expanduser("~/.config/poly/telegram.json"),
+        ]
+        for path in default_paths:
+            config = cls.from_json(path)
+            if config:
+                return config
+
+        # Fall back to environment variables
+        return cls.from_env()
+
 
 class TelegramNotifier:
     """Sends notifications to Telegram."""

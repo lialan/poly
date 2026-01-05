@@ -18,7 +18,8 @@ from poly.telegram_notifier import TelegramNotifier, TelegramConfig
 
 async def test_basic_message():
     """Test sending a basic message."""
-    notifier = TelegramNotifier.from_env()
+    config = TelegramConfig.load()
+    notifier = TelegramNotifier.from_config(config) if config else None
 
     if not notifier or not notifier.is_enabled:
         print("Telegram notifier not configured.")
@@ -38,7 +39,8 @@ async def test_basic_message():
 
 async def test_price_alert():
     """Test sending a price alert."""
-    notifier = TelegramNotifier.from_env()
+    config = TelegramConfig.load()
+    notifier = TelegramNotifier.from_config(config) if config else None
 
     if not notifier or not notifier.is_enabled:
         return False
@@ -61,7 +63,8 @@ async def test_price_alert():
 
 async def test_btc_15m_alert():
     """Test sending a BTC 15m prediction alert."""
-    notifier = TelegramNotifier.from_env()
+    config = TelegramConfig.load()
+    notifier = TelegramNotifier.from_config(config) if config else None
 
     if not notifier or not notifier.is_enabled:
         return False
@@ -85,7 +88,8 @@ async def test_btc_15m_alert():
 
 async def test_prediction_alert():
     """Test sending a generic prediction alert."""
-    notifier = TelegramNotifier.from_env()
+    config = TelegramConfig.load()
+    notifier = TelegramNotifier.from_config(config) if config else None
 
     if not notifier or not notifier.is_enabled:
         return False
@@ -113,12 +117,15 @@ async def main():
     print("=" * 50)
     print()
 
-    # Check if configured
-    config = TelegramConfig.from_env()
+    # Check if configured - try JSON config first, then env
+    config = TelegramConfig.load()
     if not config:
         print("❌ Telegram not configured!")
         print()
-        print("To configure, add to .env file:")
+        print("Option 1: Create config/telegram.json:")
+        print('  {"token": "your_token", "chat_id": "your_chat_id"}')
+        print()
+        print("Option 2: Add to .env file:")
         print("  TELEGRAM_BOT_TOKEN=your_bot_token")
         print("  TELEGRAM_CHAT_ID=your_chat_id")
         print()
