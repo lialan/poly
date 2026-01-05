@@ -14,6 +14,12 @@ from .gamma import (
     fetch_event_from_url,
     search_events,
 )
+from .btc_15m import (
+    BTC15mPrediction,
+    fetch_current_and_upcoming,
+    fetch_btc_15m_prediction,
+    print_predictions,
+)
 
 __all__ = [
     "PolymarketClient",
@@ -28,4 +34,8 @@ __all__ = [
     "fetch_event_by_slug",
     "fetch_event_from_url",
     "search_events",
+    "BTC15mPrediction",
+    "fetch_current_and_upcoming",
+    "fetch_btc_15m_prediction",
+    "print_predictions",
 ]
