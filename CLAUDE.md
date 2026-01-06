@@ -7,6 +7,9 @@ A Python-based trading platform for interacting with Polymarket prediction marke
 - **Language**: Python 3.11+
 - **APIs**: Polymarket CLOB API (`py-clob-client`), Gamma Markets API
 - **Blockchain**: web3.py, eth-account for Polygon network
+- **Price Feeds**: Chainlink on-chain oracles (Ethereum mainnet)
+- **Database**: Google Cloud Bigtable, SQLite (local)
+- **Cloud**: Google Cloud Run, Cloud Build, Artifact Registry
 - **Async**: asyncio, aiohttp
 - **Testing**: pytest, pytest-asyncio
 - **Linting**: ruff, black, mypy
@@ -25,26 +28,32 @@ poly/
 │   ├── gamma.py              # Gamma API for public event data
 │   ├── btc_15m.py            # BTC 15-minute prediction markets
 │   ├── binance_price.py      # Binance price and kline data
+│   ├── chainlink_price.py    # Chainlink on-chain price feeds
 │   ├── market_snapshot.py    # Orderbook snapshots for markets
 │   ├── telegram_notifier.py  # Telegram notification alerts
-│   └── sqlite_writer.py      # SQLite database storage
+│   ├── sqlite_writer.py      # SQLite database storage
+│   ├── bigtable_writer.py    # Google Cloud Bigtable storage
+│   └── db_writer.py          # Database backend abstraction
 ├── tests/
 │   └── test_client.py        # Unit tests for client and models
 ├── scripts/
 │   ├── setup.sh              # Cross-platform setup (Mac/Ubuntu)
 │   ├── run.py                # Application entry point
+│   ├── cloudrun_collector.py # Cloud Run collector with health endpoint
+│   ├── collect_snapshots.py  # Local data collector (SQLite)
 │   ├── test_btc_15m.py       # Test BTC 15m predictions
 │   ├── test_binance.py       # Test Binance price fetching
 │   ├── test_telegram.py      # Test Telegram notifications
 │   ├── test_market_snapshot.py  # Test market snapshots
-│   ├── test_sqlite.py        # Test SQLite writer
-│   └── collect_snapshots.py  # Continuous data collector
+│   └── test_sqlite.py        # Test SQLite writer
 ├── config/                   # Config files (gitignored)
 │   └── telegram.json         # Telegram bot credentials
 ├── requirements.txt          # Python dependencies
 ├── pyproject.toml            # Project config, tool settings
-├── Dockerfile                # Multi-stage build (prod/dev)
+├── Dockerfile                # Multi-stage build (prod/dev/cloudrun)
 ├── docker-compose.yml        # Container orchestration
+├── cloudbuild.yaml           # Google Cloud Build config
+├── DEPLOYMENT.md             # Cloud Run deployment guide
 ├── .env.example              # Environment variable template
 └── .gitignore
 ```
@@ -101,6 +110,17 @@ poly/
 - `get_klines(symbol, interval, limit)`: OHLCV candlestick data
 - `get_btc_15m_kline()`, `get_eth_15m_kline()`: Convenience functions
 - Data models: `TickerPrice`, `TickerStats`, `Kline`
+- Base URL: `https://data-api.binance.vision/api/v3` (Cloud Run compatible)
+
+### `chainlink_price.py` - Chainlink On-Chain Price Feeds
+- `get_btc_price()`: BTC/USD from Chainlink oracle
+- `get_eth_price()`: ETH/USD from Chainlink oracle
+- `get_prices()`: Both BTC and ETH prices concurrently
+- Uses Ethereum mainnet Chainlink aggregator contracts
+- Feed addresses:
+  - BTC/USD: `0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c`
+  - ETH/USD: `0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419`
+- RPC endpoints: eth.llamarpc.com, ethereum.publicnode.com, 1rpc.io/eth
 
 ### `market_snapshot.py` - Orderbook Snapshots
 - `MarketSnapshot`: Dataclass with bid/ask prices, depth, volume
@@ -119,7 +139,7 @@ poly/
 - `send_prediction_alert()`: Generic prediction alerts
 - Config: `config/telegram.json` or `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` env vars
 
-### `sqlite_writer.py` - Database Storage
+### `sqlite_writer.py` - SQLite Storage (Local)
 - `SQLiteWriter`: Write/query market data to SQLite
 - Tables: `market_snapshots`, `opportunities`, `simulated_trades`, `equity_curve`
 - `write_snapshot_from_obj(snapshot)`: Store MarketSnapshot directly
@@ -127,12 +147,37 @@ poly/
 - `get_snapshots()`, `get_trades()`, `get_equity_curve()`: Query methods
 - Default DB: `poly_data.db` in project root (gitignored)
 
-### `scripts/collect_snapshots.py` - Data Collector
-- Continuous market snapshot collector
+### `bigtable_writer.py` - Google Cloud Bigtable Storage
+- `BigtableWriter`: Write market data to Bigtable
+- Tables: `market_snapshots`, `opportunities`, `simulated_trades`, `equity_curve`
+- `write_snapshot_from_obj(snapshot, horizon, btc_price)`: Store snapshot with price
+- `ensure_tables()`: Create tables and column families if needed
+- Row key format: `{inverted_timestamp}#{market_id}` (newest first)
+- Column family: `data` with JSON-encoded values
+
+### `db_writer.py` - Database Backend Abstraction
+- `get_db_writer(backend, project_id, instance_id)`: Factory function
+- Supported backends: `sqlite`, `bigtable`
+- Returns appropriate writer instance based on backend type
+- Environment variables: `DB_BACKEND`, `BIGTABLE_PROJECT_ID`, `BIGTABLE_INSTANCE_ID`
+
+### `scripts/collect_snapshots.py` - Local Data Collector
+- Continuous market snapshot collector (SQLite backend)
 - Configurable interval: `--interval SECONDS` (default: 5)
 - Custom database: `--db PATH`
 - Adjusts sleep time based on query duration
 - Graceful shutdown with Ctrl+C
+
+### `scripts/cloudrun_collector.py` - Cloud Run Collector
+- Cloud Run compatible collector with HTTP health endpoint
+- Concurrent fetching: Polymarket snapshots + Chainlink BTC price
+- Health server on configurable port (default: 8080)
+- Environment variables:
+  - `PORT`: Health check port (set by Cloud Run)
+  - `COLLECT_INTERVAL`: Seconds between snapshots (default: 5)
+  - `DB_BACKEND`: Storage backend (default: bigtable)
+  - `BIGTABLE_PROJECT_ID`: GCP project ID
+  - `BIGTABLE_INSTANCE_ID`: Bigtable instance ID
 
 ## Development Commands
 ```bash
@@ -169,11 +214,17 @@ python scripts/run.py
 ```
 
 ## Environment Variables
-Required (see `.env.example`):
+Required for trading (see `.env.example`):
 - `POLYMARKET_API_KEY` - API key from Polymarket
 - `POLYMARKET_SECRET` - API secret
 - `POLYMARKET_PASSPHRASE` - API passphrase
 - `PRIVATE_KEY` - Ethereum private key (no 0x prefix)
+
+Cloud Run / Bigtable:
+- `DB_BACKEND` - Storage backend: `sqlite` or `bigtable`
+- `BIGTABLE_PROJECT_ID` - GCP project ID
+- `BIGTABLE_INSTANCE_ID` - Bigtable instance ID
+- `COLLECT_INTERVAL` - Seconds between snapshots (default: 5)
 
 Optional:
 - `CHAIN_ID` - Network ID (default: 137 for Polygon)
@@ -226,10 +277,15 @@ Key endpoints:
 - `GET /prices-history?market={id}` - CLOB API, price history
 
 ### Binance API
-- Base URL: `https://api.binance.com/api/v3`
+- Base URL: `https://data-api.binance.vision/api/v3` (Cloud Run compatible)
 - `GET /ticker/price` - Current prices
 - `GET /ticker/24hr` - 24h statistics
 - `GET /klines` - Candlestick/OHLCV data
+
+### Chainlink Price Feeds (Ethereum Mainnet)
+- BTC/USD: `0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c`
+- ETH/USD: `0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419`
+- Uses `latestRoundData()` from Aggregator V3 interface
 
 ### BTC 15m Market Slug Pattern
 ```
