@@ -140,10 +140,12 @@ def get_db_writer(
     elif backend == "bigtable":
         from .bigtable_writer import BigtableWriter
 
-        return BigtableWriter(
+        writer = BigtableWriter(
             project_id=project_id or os.getenv("BIGTABLE_PROJECT_ID"),
             instance_id=instance_id or os.getenv("BIGTABLE_INSTANCE_ID"),
         )
+        writer.ensure_tables()
+        return writer
 
     else:
         raise ValueError(f"Unknown backend: {backend}. Use 'sqlite' or 'bigtable'.")

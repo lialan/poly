@@ -1,4 +1,91 @@
-# Google Cloud Bigtable Setup
+# Google Cloud Setup
+
+## Table of Contents
+- [Cloud Run Deployment](#cloud-run-deployment)
+- [Bigtable Setup](#bigtable-setup)
+- [Authentication](#authentication)
+
+---
+
+## Cloud Run Deployment
+
+### Build and Push Container
+
+```bash
+# Set your project
+export PROJECT_ID=your-project-id
+
+# Enable required APIs
+gcloud services enable run.googleapis.com
+gcloud services enable cloudbuild.googleapis.com
+gcloud services enable artifactregistry.googleapis.com
+
+# Create Artifact Registry repository (first time only)
+gcloud artifacts repositories create poly-repo \
+    --repository-format=docker \
+    --location=us-central1
+
+# Build and push using Cloud Build
+gcloud builds submit \
+    --tag us-central1-docker.pkg.dev/$PROJECT_ID/poly-repo/poly-collector:latest \
+    --target cloudrun
+```
+
+### Deploy to Cloud Run
+
+```bash
+# Deploy the collector
+gcloud run deploy poly-collector \
+    --image us-central1-docker.pkg.dev/$PROJECT_ID/poly-repo/poly-collector:latest \
+    --platform managed \
+    --region us-central1 \
+    --allow-unauthenticated \
+    --min-instances 1 \
+    --max-instances 1 \
+    --memory 512Mi \
+    --cpu 1 \
+    --timeout 3600 \
+    --set-env-vars "BIGTABLE_PROJECT_ID=$PROJECT_ID,BIGTABLE_INSTANCE_ID=poly-data,COLLECT_INTERVAL=5"
+```
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PORT` | Health check port (set by Cloud Run) | 8080 |
+| `COLLECT_INTERVAL` | Seconds between snapshots | 5 |
+| `DB_BACKEND` | Storage backend | bigtable |
+| `BIGTABLE_PROJECT_ID` | GCP project ID | - |
+| `BIGTABLE_INSTANCE_ID` | Bigtable instance | - |
+
+### View Logs
+
+```bash
+gcloud run services logs read poly-collector --region us-central1 --limit 100
+```
+
+### Update Deployment
+
+```bash
+# Rebuild and redeploy
+gcloud builds submit \
+    --tag us-central1-docker.pkg.dev/$PROJECT_ID/poly-repo/poly-collector:latest \
+    --target cloudrun
+
+gcloud run services update poly-collector \
+    --image us-central1-docker.pkg.dev/$PROJECT_ID/poly-repo/poly-collector:latest \
+    --region us-central1
+```
+
+### Delete Deployment
+
+```bash
+gcloud run services delete poly-collector --region us-central1
+```
+
+---
+
+# Bigtable Setup
 
 This guide covers setting up Google Cloud Bigtable for the Polymarket data collector.
 

@@ -1,0 +1,11 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--target=cloudrun'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/poly-repo/poly-collector:latest'
+      - '.'
+
+images:
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/poly-repo/poly-collector:latest'

@@ -7,7 +7,8 @@ from typing import Optional
 
 import aiohttp
 
-BINANCE_API_BASE = "https://api.binance.com/api/v3"
+# Use data-api.binance.vision for Cloud Run compatibility (api.binance.com blocked)
+BINANCE_API_BASE = "https://data-api.binance.vision/api/v3"
 
 # Common trading pairs
 BTCUSDT = "BTCUSDT"

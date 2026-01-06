@@ -40,9 +40,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy application code
-COPY src/ ./src/
-COPY scripts/ ./scripts/
+# Copy application code and set ownership
+COPY --chown=appuser:appuser src/ ./src/
+COPY --chown=appuser:appuser scripts/ ./scripts/
 
 # Set Python path
 ENV PYTHONPATH="/app/src"
@@ -58,6 +58,21 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 # Default command
 CMD ["python", "scripts/run.py"]
+
+
+# Cloud Run collector stage
+FROM production AS cloudrun
+
+# Cloud Run configuration
+ENV PORT=8080
+ENV COLLECT_INTERVAL=5
+ENV DB_BACKEND=bigtable
+
+# Expose port for health checks
+EXPOSE 8080
+
+# Run the Cloud Run collector
+CMD ["python", "scripts/cloudrun_collector.py"]
 
 
 # Development stage

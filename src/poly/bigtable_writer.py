@@ -95,7 +95,7 @@ class BigtableWriter:
             self._instance = self._client.instance(self.instance_id)
         return self._client
 
-    def _get_table(self, table_name: str) -> bigtable.Table:
+    def _get_table(self, table_name: str):
         """Get or create table reference."""
         if table_name not in self._tables:
             self._get_client()
