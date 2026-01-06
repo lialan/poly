@@ -1,6 +1,6 @@
-# Cloud Run Deployment Guide
+# GCE Deployment Guide
 
-This guide covers deploying the Polymarket data collector to Google Cloud Run with Bigtable storage.
+This guide covers deploying the Polymarket data collector to Google Compute Engine (GCE) with Bigtable storage.
 
 ## Prerequisites
 
@@ -8,27 +8,31 @@ This guide covers deploying the Polymarket data collector to Google Cloud Run wi
 2. **GCP Project** with billing enabled
 3. **Bigtable instance** (see [Bigtable Setup](#bigtable-setup))
 
-## Quick Deploy
+## Current Production Setup
+
+| Resource | Value |
+|----------|-------|
+| Instance | `poly-collector` |
+| Type | e2-micro (free tier eligible) |
+| Zone | us-central1-a |
+| External IP | 35.224.204.208 |
+| Project | poly-collector |
+| Bigtable Instance | poly-data |
+
+## Quick Deploy (Code Updates)
 
 ```bash
-# Set your project
-export PROJECT_ID=poly-collector
+# Sync code to GCE
+rsync -avz --exclude='*.pyc' --exclude='__pycache__' \
+  -e "ssh -i ~/.ssh/google_compute_engine" \
+  src/poly/ lialan@35.224.204.208:~/poly/src/poly/
 
-# Build and push container
-gcloud builds submit --config cloudbuild.yaml --project $PROJECT_ID
+scp -i ~/.ssh/google_compute_engine scripts/cloudrun_collector.py \
+  lialan@35.224.204.208:~/poly/scripts/
 
-# Deploy to Cloud Run
-gcloud run deploy poly-collector \
-    --image us-central1-docker.pkg.dev/$PROJECT_ID/poly-repo/poly-collector:latest \
-    --platform managed \
-    --region us-central1 \
-    --allow-unauthenticated \
-    --min-instances 1 \
-    --max-instances 1 \
-    --memory 512Mi \
-    --cpu 1 \
-    --timeout 3600 \
-    --set-env-vars "BIGTABLE_PROJECT_ID=$PROJECT_ID,BIGTABLE_INSTANCE_ID=poly-data,COLLECT_INTERVAL=5"
+# Restart service
+gcloud compute ssh poly-collector --zone=us-central1-a --project=poly-collector \
+  --command='sudo systemctl restart poly-collector'
 ```
 
 ## First-Time Setup
@@ -36,180 +40,224 @@ gcloud run deploy poly-collector \
 ### 1. Enable Required APIs
 
 ```bash
-gcloud services enable run.googleapis.com
-gcloud services enable cloudbuild.googleapis.com
-gcloud services enable artifactregistry.googleapis.com
+gcloud services enable compute.googleapis.com
 gcloud services enable bigtable.googleapis.com
 gcloud services enable bigtableadmin.googleapis.com
 ```
 
-### 2. Create Artifact Registry Repository
+### 2. Create Bigtable Instance
 
 ```bash
-gcloud artifacts repositories create poly-repo \
-    --repository-format=docker \
-    --location=us-central1
-```
-
-### 3. Create Bigtable Instance
-
-```bash
-# Production instance (~$0.65/hour per node)
-gcloud bigtable instances create poly-data \
-    --display-name="Polymarket Data" \
-    --cluster-config=id=poly-cluster,zone=us-central1-a,nodes=1
-
-# OR Development instance (free tier eligible, no SLA)
+# Development instance (free tier eligible, no SLA)
 gcloud bigtable instances create poly-data \
     --display-name="Polymarket Data" \
     --cluster-config=id=poly-cluster,zone=us-central1-a \
     --instance-type=DEVELOPMENT
+
+# OR Production instance (~$0.65/hour per node)
+gcloud bigtable instances create poly-data \
+    --display-name="Polymarket Data" \
+    --cluster-config=id=poly-cluster,zone=us-central1-a,nodes=1
 ```
 
-### 4. Grant IAM Permissions
-
-Cloud Run uses the default compute service account. Grant Bigtable access:
+### 3. Create GCE Instance
 
 ```bash
-# Get the service account email
-SA_EMAIL=$(gcloud iam service-accounts list \
-    --filter="email ~ compute@developer.gserviceaccount.com" \
-    --format="value(email)")
-
-# Grant Bigtable User role
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:$SA_EMAIL" \
-    --role="roles/bigtable.user"
+gcloud compute instances create poly-collector \
+  --project=poly-collector \
+  --zone=us-central1-a \
+  --machine-type=e2-micro \
+  --image-family=debian-12 \
+  --image-project=debian-cloud \
+  --boot-disk-size=10GB \
+  --scopes=cloud-platform \
+  --tags=http-server
 ```
 
-## Build and Deploy
-
-### Build Container
+### 4. Setup Instance
 
 ```bash
-# Using Cloud Build (recommended)
-gcloud builds submit --config cloudbuild.yaml --project $PROJECT_ID
+# SSH into instance
+gcloud compute ssh poly-collector --zone=us-central1-a --project=poly-collector
 
-# Or build locally and push
-docker build --target cloudrun -t us-central1-docker.pkg.dev/$PROJECT_ID/poly-repo/poly-collector:latest .
-docker push us-central1-docker.pkg.dev/$PROJECT_ID/poly-repo/poly-collector:latest
+# Install dependencies
+sudo apt-get update
+sudo apt-get install -y python3 python3-pip python3-venv rsync
+
+# Create project directory
+mkdir -p ~/poly
 ```
 
-### Deploy to Cloud Run
+### 5. Copy Project Files
 
 ```bash
-gcloud run deploy poly-collector \
-    --image us-central1-docker.pkg.dev/$PROJECT_ID/poly-repo/poly-collector:latest \
-    --platform managed \
-    --region us-central1 \
-    --allow-unauthenticated \
-    --min-instances 1 \
-    --max-instances 1 \
-    --memory 512Mi \
-    --cpu 1 \
-    --timeout 3600 \
-    --set-env-vars "BIGTABLE_PROJECT_ID=$PROJECT_ID,BIGTABLE_INSTANCE_ID=poly-data,COLLECT_INTERVAL=5"
+# From local machine - copy essential files
+rsync -avz --exclude='*.pyc' --exclude='__pycache__' --exclude='.venv' \
+  -e "ssh -i ~/.ssh/google_compute_engine" \
+  src/ scripts/cloudrun_collector.py requirements.txt \
+  lialan@35.224.204.208:~/poly/
 ```
 
-### Update Existing Deployment
+### 6. Setup Python Environment on GCE
 
 ```bash
-# Rebuild
-gcloud builds submit --config cloudbuild.yaml --project $PROJECT_ID
+# SSH into instance
+gcloud compute ssh poly-collector --zone=us-central1-a --project=poly-collector
 
-# Update service
-gcloud run services update poly-collector \
-    --image us-central1-docker.pkg.dev/$PROJECT_ID/poly-repo/poly-collector:latest \
-    --region us-central1
+# Setup venv
+cd ~/poly
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### 7. Create Systemd Service
+
+```bash
+# On GCE instance
+sudo tee /etc/systemd/system/poly-collector.service << 'EOF'
+[Unit]
+Description=Polymarket Data Collector
+After=network.target
+
+[Service]
+Type=simple
+User=lialan
+WorkingDirectory=/home/lialan/poly
+Environment="PYTHONPATH=/home/lialan/poly/src"
+Environment="DB_BACKEND=bigtable"
+Environment="BIGTABLE_PROJECT_ID=poly-collector"
+Environment="BIGTABLE_INSTANCE_ID=poly-data"
+Environment="COLLECT_INTERVAL=5"
+ExecStart=/home/lialan/poly/.venv/bin/python scripts/cloudrun_collector.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable and start
+sudo systemctl daemon-reload
+sudo systemctl enable poly-collector
+sudo systemctl start poly-collector
+```
+
+## Operations
+
+### Check Service Status
+
+```bash
+gcloud compute ssh poly-collector --zone=us-central1-a --project=poly-collector \
+  --command='sudo systemctl status poly-collector'
+```
+
+### View Logs
+
+```bash
+# Recent logs
+gcloud compute ssh poly-collector --zone=us-central1-a --project=poly-collector \
+  --command='sudo journalctl -u poly-collector -n 50 --no-pager'
+
+# Follow logs
+gcloud compute ssh poly-collector --zone=us-central1-a --project=poly-collector \
+  --command='sudo journalctl -u poly-collector -f'
+```
+
+### Restart Service
+
+```bash
+gcloud compute ssh poly-collector --zone=us-central1-a --project=poly-collector \
+  --command='sudo systemctl restart poly-collector'
+```
+
+### Stop/Start Instance
+
+```bash
+# Stop (to save costs)
+gcloud compute instances stop poly-collector --zone=us-central1-a --project=poly-collector
+
+# Start
+gcloud compute instances start poly-collector --zone=us-central1-a --project=poly-collector
+```
+
+## Monitoring
+
+### View Bigtable Data
+
+```bash
+# From local machine
+PYTHONPATH=src python scripts/query_bigtable.py --count 10
+
+# Or use the Cloud Console
+# https://console.cloud.google.com/bigtable/instances/poly-data/tables?project=poly-collector
+```
+
+### Health Check
+
+```bash
+# Check health endpoint (from local)
+curl http://35.224.204.208:8080/health
 ```
 
 ## Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `PORT` | Health check port (set by Cloud Run) | 8080 |
+| `PYTHONPATH` | Python module path | /home/lialan/poly/src |
 | `COLLECT_INTERVAL` | Seconds between snapshots | 5 |
 | `DB_BACKEND` | Storage backend | bigtable |
-| `BIGTABLE_PROJECT_ID` | GCP project ID | - |
-| `BIGTABLE_INSTANCE_ID` | Bigtable instance | - |
-
-## Monitoring
-
-### View Logs
-
-```bash
-# Recent logs
-gcloud run services logs read poly-collector --region us-central1 --limit 50
-
-# Stream logs
-gcloud run services logs tail poly-collector --region us-central1
-```
-
-### Check Service Status
-
-```bash
-gcloud run services describe poly-collector --region us-central1
-```
-
-### View Bigtable Data
-
-```bash
-# Install cbt CLI
-gcloud components install cbt
-
-# Read recent snapshots
-cbt -project $PROJECT_ID -instance poly-data read market_snapshots count=10
-```
-
-Or use the Cloud Console:
-- https://console.cloud.google.com/bigtable/instances/poly-data/tables?project=poly-collector
+| `BIGTABLE_PROJECT_ID` | GCP project ID | poly-collector |
+| `BIGTABLE_INSTANCE_ID` | Bigtable instance | poly-data |
 
 ## Troubleshooting
 
-### Container Won't Start
+### Service Won't Start
 
-Check logs for startup errors:
 ```bash
-gcloud run services logs read poly-collector --region us-central1 --limit 100
+# Check logs for errors
+sudo journalctl -u poly-collector -n 100 --no-pager
+
+# Check if Python path is correct
+ls -la /home/lialan/poly/.venv/bin/python
 ```
 
 ### Bigtable Connection Issues
 
-Verify IAM permissions:
 ```bash
-gcloud projects get-iam-policy $PROJECT_ID \
-    --flatten="bindings[].members" \
-    --filter="bindings.role:roles/bigtable"
+# Verify instance has cloud-platform scope
+gcloud compute instances describe poly-collector \
+  --zone=us-central1-a --project=poly-collector \
+  --format='get(serviceAccounts[0].scopes)'
 ```
 
-### Health Check Failures
+### Network Issues
 
-The collector exposes a health endpoint at `/health`. If it returns 503:
-- Check if collector is receiving data
-- Verify Polymarket API is accessible
-- Check Chainlink RPC connectivity
+Note: Binance WebSocket (`wss://stream.binance.com`) returns HTTP 451 on GCP.
+The collector uses REST API (`https://data-api.binance.vision`) which works fine.
 
 ## Cost Estimates
 
 | Resource | Cost |
 |----------|------|
-| Cloud Run (min 1 instance) | ~$0.024/hour |
-| Bigtable (1 node, production) | ~$0.65/hour |
+| GCE e2-micro | Free tier (1 instance/month) |
 | Bigtable (development) | Free tier eligible |
-| Artifact Registry | ~$0.10/GB/month |
+| Bigtable (1 node, production) | ~$0.65/hour (~$470/month) |
+| Network egress | Minimal |
 
-**Tip**: Use a development Bigtable instance for testing (~$0/month vs ~$470/month).
+**Tip**: Use a development Bigtable instance for testing (free vs ~$470/month).
 
 ## Cleanup
 
 ```bash
-# Delete Cloud Run service
-gcloud run services delete poly-collector --region us-central1
+# Stop the service
+gcloud compute ssh poly-collector --zone=us-central1-a --project=poly-collector \
+  --command='sudo systemctl stop poly-collector'
+
+# Delete GCE instance
+gcloud compute instances delete poly-collector --zone=us-central1-a --project=poly-collector
 
 # Delete Bigtable instance (careful - deletes all data!)
-gcloud bigtable instances delete poly-data
-
-# Delete Artifact Registry images
-gcloud artifacts docker images delete \
-    us-central1-docker.pkg.dev/$PROJECT_ID/poly-repo/poly-collector
+gcloud bigtable instances delete poly-data --project=poly-collector
 ```

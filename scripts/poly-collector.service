@@ -1,0 +1,19 @@
+[Unit]
+Description=Polymarket Data Collector with WebSocket
+After=network.target
+
+[Service]
+Type=simple
+User=poly
+WorkingDirectory=/home/poly/poly
+Environment="PYTHONPATH=/home/poly/poly/src"
+Environment="DB_BACKEND=bigtable"
+Environment="BIGTABLE_PROJECT_ID=poly-collector"
+Environment="BIGTABLE_INSTANCE_ID=poly-data"
+Environment="COLLECT_INTERVAL=5"
+ExecStart=/home/poly/poly/.venv/bin/python scripts/cloudrun_collector.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

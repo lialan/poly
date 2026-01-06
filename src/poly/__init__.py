@@ -44,6 +44,12 @@ from .market_snapshot import (
 )
 from .sqlite_writer import SQLiteWriter
 from .db_writer import get_db_writer, DBWriter
+from .binance_ws import (
+    BinanceKlineStream,
+    RealtimeKline,
+    collect_klines,
+    parse_kline_message,
+)
 
 # Lazy import for BigtableWriter (requires google-cloud-bigtable)
 def __getattr__(name):
@@ -93,4 +99,8 @@ __all__ = [
     "BigtableConfig",
     "get_db_writer",
     "DBWriter",
+    "BinanceKlineStream",
+    "RealtimeKline",
+    "collect_klines",
+    "parse_kline_message",
 ]

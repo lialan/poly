@@ -1,27 +1,33 @@
 #!/usr/bin/env python3
-"""Cloud Run collector with HTTP health endpoint.
+"""Cloud Run / GCE collector with HTTP health endpoint.
 
-Runs the snapshot collector alongside a minimal HTTP server for Cloud Run health checks.
+Runs the snapshot collector alongside a minimal HTTP server for health checks.
+Uses Binance REST API for BTC price data.
 """
 
 import asyncio
 import os
-import signal
 import sys
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from decimal import Decimal
+from typing import Optional
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from poly.market_snapshot import fetch_current_snapshot
 from poly.db_writer import get_db_writer
-from poly.chainlink_price import get_btc_price
+from poly.binance_price import get_btc_price
 
 # Collector state
 collector_healthy = True
 last_success_time = 0
+latest_btc_price: Optional[Decimal] = None
+
+# Timeout for API calls (seconds)
+FETCH_TIMEOUT = 5.0
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -33,7 +39,8 @@ class HealthHandler(BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain")
                 self.end_headers()
-                self.wfile.write(b"OK")
+                price_str = f"${latest_btc_price:,.2f}" if latest_btc_price else "N/A"
+                self.wfile.write(f"OK - BTC: {price_str}".encode())
             else:
                 self.send_response(503)
                 self.send_header("Content-Type", "text/plain")
@@ -57,7 +64,7 @@ def run_health_server(port: int):
 
 async def run_collector(interval: float):
     """Run the snapshot collector loop."""
-    global collector_healthy, last_success_time
+    global collector_healthy, last_success_time, latest_btc_price
     import time
     from datetime import datetime, timezone
 
@@ -80,18 +87,29 @@ async def run_collector(interval: float):
     success_count = 0
     error_count = 0
 
+    print(f"Collection loop starting (timeout: {FETCH_TIMEOUT}s)")
+    sys.stdout.flush()
+
+    loop_count = 0
     while True:
+        loop_count += 1
         start_time = time.time()
+        timestamp = datetime.now(timezone.utc).strftime('%H:%M:%S')
+        print(f"[{timestamp}] Loop {loop_count}: fetching...", end=" ", flush=True)
 
         try:
-            # Fetch snapshot and BTC price (from Chainlink) concurrently
-            snapshot, btc_price = await asyncio.gather(
-                fetch_current_snapshot(),
-                get_btc_price(),
+            # Fetch snapshot and BTC price concurrently with timeout
+            snapshot, btc_price = await asyncio.wait_for(
+                asyncio.gather(
+                    fetch_current_snapshot(),
+                    get_btc_price(),
+                ),
+                timeout=FETCH_TIMEOUT,
             )
 
-            if snapshot:
-                btc_price_float = float(btc_price) if btc_price else 0.0
+            if snapshot and btc_price:
+                latest_btc_price = btc_price
+                btc_price_float = float(btc_price)
                 writer.write_snapshot_from_obj(snapshot, horizon="15m", btc_price=btc_price_float)
 
                 # Calculate real market probability
@@ -99,26 +117,34 @@ async def run_collector(interval: float):
                 real_yes_ask = snapshot.depth_yes_asks[-1].price if snapshot.depth_yes_asks else None
                 if real_yes_bid and real_yes_ask:
                     real_mid = (float(real_yes_bid) + float(real_yes_ask)) / 2
-                    print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] "
-                          f"{snapshot.market_id} | BTC: ${btc_price_float:,.0f} | "
-                          f"Market: {real_mid*100:.1f}%")
+                    elapsed = time.time() - start_time
+                    print(f"OK ({elapsed:.1f}s) | {snapshot.market_id} | BTC: ${btc_price_float:,.0f} | "
+                          f"Market: {real_mid*100:.1f}%", flush=True)
+                else:
+                    elapsed = time.time() - start_time
+                    print(f"OK ({elapsed:.1f}s) | {snapshot.market_id} | BTC: ${btc_price_float:,.0f}", flush=True)
 
                 success_count += 1
+                error_count = 0  # Reset consecutive errors on success
                 last_success_time = time.time()
                 collector_healthy = True
             else:
-                error_count += 1
-                print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Failed to fetch snapshot")
+                print("SKIP (no data)", flush=True)
+
+        except asyncio.TimeoutError:
+            print(f"SKIP (timeout {FETCH_TIMEOUT}s)", flush=True)
 
         except Exception as e:
             error_count += 1
-            print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Error: {e}")
+            print(f"ERROR: {type(e).__name__}: {e}", flush=True)
 
-            # Mark unhealthy after 5 consecutive errors
-            if error_count > 5 and success_count == 0:
-                collector_healthy = False
+        # Mark unhealthy after 10 consecutive errors
+        if error_count >= 10:
+            collector_healthy = False
+            if error_count == 10:
+                print(f"[{timestamp}] Marking collector unhealthy after {error_count} consecutive errors")
 
-        # Calculate sleep time
+        # Calculate sleep time to maintain interval
         query_time = time.time() - start_time
         sleep_time = max(0.1, interval - query_time)
         await asyncio.sleep(sleep_time)
@@ -130,17 +156,19 @@ def main():
     interval = float(os.getenv("COLLECT_INTERVAL", "5"))
 
     print("=" * 60)
-    print("POLYMARKET CLOUD RUN COLLECTOR")
+    print("POLYMARKET DATA COLLECTOR")
     print("=" * 60)
     print(f"Health port: {port}")
     print(f"Collect interval: {interval}s")
+    print(f"Fetch timeout: {FETCH_TIMEOUT}s")
+    print(f"Price source: Binance REST API")
     print("=" * 60)
 
     # Start health server in background thread
     health_thread = threading.Thread(target=run_health_server, args=(port,), daemon=True)
     health_thread.start()
 
-    # Run collector in main thread
+    # Run collector
     try:
         asyncio.run(run_collector(interval))
     except KeyboardInterrupt:

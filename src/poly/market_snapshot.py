@@ -197,18 +197,20 @@ async def fetch_market_snapshot(
         else prediction.end_time
     )
 
+    # CLOB API returns bids ascending (worst to best) and asks descending (worst to best)
+    # So best bid = last element (highest price), best ask = last element (lowest price)
     return MarketSnapshot(
         timestamp=time.time(),
         market_id=prediction.slug,
         resolution_time=resolution_time,
-        # YES (UP) token
-        best_yes_bid=yes_bids[0].price if yes_bids else None,
-        best_yes_ask=yes_asks[0].price if yes_asks else None,
+        # YES (UP) token - use last element for best prices
+        best_yes_bid=yes_bids[-1].price if yes_bids else None,
+        best_yes_ask=yes_asks[-1].price if yes_asks else None,
         depth_yes_bids=yes_bids,  # All bid levels
         depth_yes_asks=yes_asks,  # All ask levels
-        # NO (DOWN) token
-        best_no_bid=no_bids[0].price if no_bids else None,
-        best_no_ask=no_asks[0].price if no_asks else None,
+        # NO (DOWN) token - use last element for best prices
+        best_no_bid=no_bids[-1].price if no_bids else None,
+        best_no_ask=no_asks[-1].price if no_asks else None,
         depth_no_bids=no_bids,
         depth_no_asks=no_asks,
         # Volume from Gamma API
