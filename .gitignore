@@ -68,7 +68,9 @@ Thumbs.db
 # Project specific
 *.db
 *.sqlite
+*.sqlite3
 data/
+poly_data.db
 
 # Config files with secrets
 config/
