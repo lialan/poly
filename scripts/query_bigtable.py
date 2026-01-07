@@ -49,7 +49,7 @@ def query_snapshots(
 
         print(f"[{row_count}] {get_val(b'market_id')}")
         print(f"    Time:      {dt.strftime('%Y-%m-%d %H:%M:%S UTC') if dt else 'N/A'}")
-        print(f"    BTC Price: ${float(get_val(b'btc_price')):,.2f}" if get_val(b"btc_price") != "N/A" else "    BTC Price: N/A")
+        print(f"    Spot Price: ${float(get_val(b'spot_price')):,.2f}" if get_val(b"spot_price") != "N/A" else "    Spot Price: N/A")
         print(f"    YES:       bid={get_val(b'yes_bid')} / ask={get_val(b'yes_ask')}")
         print(f"    NO:        bid={get_val(b'no_bid')} / ask={get_val(b'no_ask')}")
 

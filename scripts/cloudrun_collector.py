@@ -79,7 +79,7 @@ class MarketType:
             return MarketSnapshot(
                 timestamp=time_module.time(),
                 market_id=prediction.slug,
-                btc_price=price,  # Using btc_price field for asset price
+                spot_price=price,
                 yes_bids=yes_bids,
                 yes_asks=yes_asks,
                 no_bids=no_bids,

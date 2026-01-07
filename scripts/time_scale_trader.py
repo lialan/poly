@@ -718,7 +718,7 @@ def load_market_data(
     for snap in snapshots_15m:
         ts = snap.get("ts", 0)
         market_id = snap.get("market_id", "")
-        price = snap.get("btc_price", 0)  # btc_price field holds asset price
+        price = snap.get("spot_price", 0)
         orderbook_json = snap.get("orderbook")
 
         orderbook = parse_orderbook_json(orderbook_json)

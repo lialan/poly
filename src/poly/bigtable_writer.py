@@ -211,7 +211,7 @@ class BigtableWriter:
     def write_snapshot(
         self,
         market_id: str,
-        btc_price: float,
+        spot_price: float,
         orderbook_json: str,
         ts: Optional[float] = None,
         table_name: str = TABLE_SNAPSHOTS_15M,
@@ -219,11 +219,11 @@ class BigtableWriter:
         """Write a market snapshot (minimal format).
 
         Stores only non-derivable data:
-        - timestamp, market_id, btc_price, orderbook
+        - timestamp, market_id, spot_price, orderbook
 
         Args:
             market_id: Market identifier/slug.
-            btc_price: BTC price at snapshot time.
+            spot_price: Asset spot price at snapshot time.
             orderbook_json: JSON string with yes_bids, yes_asks, no_bids, no_asks.
             ts: Timestamp (default: now).
             table_name: Bigtable table name (default: market_snapshots).
@@ -237,7 +237,7 @@ class BigtableWriter:
         row = table.direct_row(row_key)
         row.set_cell(CF_DATA, b"ts", self._encode_value(ts))
         row.set_cell(CF_DATA, b"market_id", self._encode_value(market_id))
-        row.set_cell(CF_DATA, b"btc_price", self._encode_value(btc_price))
+        row.set_cell(CF_DATA, b"spot_price", self._encode_value(spot_price))
         row.set_cell(CF_DATA, b"orderbook", self._encode_value(orderbook_json))
         row.commit()
 
@@ -249,7 +249,7 @@ class BigtableWriter:
         """Write a MarketSnapshot object to database.
 
         Args:
-            snapshot: MarketSnapshot object (contains btc_price).
+            snapshot: MarketSnapshot object (contains spot_price).
             table_name: Bigtable table name.
         """
         orderbook_data = {
@@ -261,7 +261,7 @@ class BigtableWriter:
 
         self.write_snapshot(
             market_id=snapshot.market_id,
-            btc_price=float(snapshot.btc_price),
+            spot_price=float(snapshot.spot_price),
             orderbook_json=json.dumps(orderbook_data),
             ts=snapshot.timestamp,
             table_name=table_name,
@@ -367,14 +367,14 @@ class BigtableWriter:
     ) -> list[dict]:
         """Query market snapshots.
 
-        Returns minimal data: ts, market_id, btc_price, orderbook (JSON).
+        Returns minimal data: ts, market_id, spot_price, orderbook (JSON).
         """
         table = self._get_table(table_name)
 
         columns = {
             "ts": float,
             "market_id": str,
-            "btc_price": float,
+            "spot_price": float,
             "orderbook": str,
         }
 

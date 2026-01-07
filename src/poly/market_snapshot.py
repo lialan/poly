@@ -40,7 +40,7 @@ class MarketSnapshot:
     Contains only non-derivable data:
     - timestamp: when snapshot was taken
     - market_id: slug (encodes resolution time)
-    - btc_price: BTC price at snapshot time
+    - spot_price: Asset spot price at snapshot time
     - yes_bids/asks: full YES token orderbook
     - no_bids/asks: full NO token orderbook
 
@@ -50,7 +50,7 @@ class MarketSnapshot:
 
     timestamp: float
     market_id: str
-    btc_price: Decimal
+    spot_price: Decimal
     yes_bids: list[OrderLevel] = field(default_factory=list)
     yes_asks: list[OrderLevel] = field(default_factory=list)
     no_bids: list[OrderLevel] = field(default_factory=list)
@@ -178,7 +178,7 @@ async def fetch_orderbook(
 
 async def fetch_market_snapshot(
     market_id: str,
-    btc_price: Decimal,
+    spot_price: Decimal,
     prediction: Optional[CryptoPrediction] = None,
     asset: Asset = Asset.BTC,
     horizon: MarketHorizon = MarketHorizon.M15,
@@ -187,7 +187,7 @@ async def fetch_market_snapshot(
 
     Args:
         market_id: Market ID (can be slug, event_id, or timestamp).
-        btc_price: Current asset price.
+        spot_price: Current asset price.
         prediction: Optional pre-fetched CryptoPrediction.
         asset: Asset type (BTC or ETH).
         horizon: Market horizon (M15, H1, H4).
@@ -221,7 +221,7 @@ async def fetch_market_snapshot(
     return MarketSnapshot(
         timestamp=time.time(),
         market_id=prediction.slug,
-        btc_price=btc_price,
+        spot_price=spot_price,
         yes_bids=yes_bids,
         yes_asks=yes_asks,
         no_bids=no_bids,
@@ -255,7 +255,7 @@ def print_snapshot(snapshot: MarketSnapshot) -> None:
     if snapshot.resolution_time:
         print(f"Resolution: {snapshot.resolution_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     print(f"Snapshot Time: {datetime.fromtimestamp(snapshot.timestamp, tz=timezone.utc).strftime('%H:%M:%S %Z')}")
-    print(f"BTC Price: ${float(snapshot.btc_price):,.2f}")
+    print(f"Spot Price: ${float(snapshot.spot_price):,.2f}")
 
     print("\n--- YES (UP) Token ---")
     if snapshot.best_yes_bid or snapshot.best_yes_ask:
