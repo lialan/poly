@@ -23,26 +23,40 @@ from poly.script_discovery import (
     get_scripts_by_category,
 )
 
+# Cached status to avoid slow Bigtable queries on every menu draw
+_cached_status: Optional[str] = None
 
-def get_collection_status() -> Optional[str]:
-    """Get Bigtable collection status summary.
 
-    Returns None if Bigtable is not accessible.
+def get_collection_status(refresh: bool = False) -> Optional[str]:
+    """Get Bigtable collection status summary (cached).
+
+    Args:
+        refresh: If True, force refresh from Bigtable.
+
+    Returns status string or None.
     """
+    global _cached_status
+
+    if not refresh and _cached_status is not None:
+        return _cached_status
+
+    if not refresh:
+        return None  # Don't query on first load
+
     try:
         from poly.bigtable_status import check_collection_status
         status = check_collection_status()
 
-        # Build compact status line
         parts = []
         for t in status.tables:
-            # Extract asset and horizon (e.g., "btc_15m" from "btc_15m_snapshot")
             name = t.table_name.replace("_snapshot", "")
             parts.append(f"{name}:{t.status_emoji}")
 
-        return " | ".join(parts)
+        _cached_status = " | ".join(parts)
+        return _cached_status
     except Exception as e:
-        return f"Error: {str(e)[:30]}"
+        _cached_status = f"Error: {str(e)[:30]}"
+        return _cached_status
 
 
 def clear_screen():
@@ -146,11 +160,13 @@ def main():
         print("  Script Launcher")
         print(f"  {'─' * 50}")
 
-        # Show collection status
+        # Show collection status (cached, use Refresh Status to update)
         status = get_collection_status()
         if status:
-            print(f"  Collection: {status}")
-            print(f"  {'─' * 50}")
+            print(f"  Status: {status}")
+        else:
+            print("  Status: (select 'Refresh Status' to check)")
+        print(f"  {'─' * 50}")
 
         print(f"  {len(all_scripts)} scripts available\n")
 
@@ -183,8 +199,10 @@ def main():
             print("Goodbye!")
             break
 
-        # Handle "Refresh Status" - just continue to redraw
+        # Handle "Refresh Status" - fetch from Bigtable and redraw
         if main_options[choice] == "Refresh Status":
+            print("\n  Fetching status from Bigtable...")
+            get_collection_status(refresh=True)
             continue
 
         # Handle "All Scripts"
