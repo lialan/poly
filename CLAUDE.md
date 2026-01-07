@@ -35,6 +35,8 @@ poly/
 │   ├── trading.py            # TradingEngine for strategy execution
 │   ├── trading_bot.py        # Monitoring bot with WebSocket + Bigtable
 │   ├── project_config.py     # Centralized config loader
+│   ├── tui.py                # TUI script launcher (poly-tui command)
+│   ├── script_discovery.py   # Script auto-discovery
 │   └── utils.py              # Helpers (retry, formatting)
 ├── scripts/
 │   ├── cloudrun_collector.py # GCE data collector (BTC + ETH)
@@ -275,6 +277,41 @@ bigtable = get_bigtable_config()
 value = get_config_value("trading_bot.timing.decision_interval_sec")
 ```
 
+### `tui.py` - TUI Script Launcher
+Centralized text user interface for launching project scripts using `textual`.
+
+**Usage:**
+```bash
+poly-tui
+```
+
+**Categories (auto-detected by naming convention):**
+| Category | Patterns | Examples |
+|----------|----------|----------|
+| Trading | `*_bot.py`, `*_trader.py`, `*trading*.py` | `run_trading_bot.py` |
+| Tests | `test_*.py`, `*benchmark*.py` | `test_polymarket_api.py` |
+| Simulations | `*simulation*.py`, `*backtest*.py` | (future scripts) |
+| Collectors | `*collector*.py`, `collect_*.py` | `cloudrun_collector.py` |
+| Utilities | Everything else | `query_bigtable.py` |
+
+**Key bindings:**
+- `q` - Quit
+- `r` - Refresh script list
+- `Enter` - Run selected script
+- `Space` - View script details
+- `1-4` - Switch tabs (Trading/Tests/Simulations/All)
+
+### `script_discovery.py` - Script Discovery
+Auto-discovers Python scripts and extracts metadata from docstrings.
+
+**Classes:**
+- `ScriptInfo` - Metadata about a discovered script
+
+**Functions:**
+- `discover_scripts()` - Scan scripts/ directory
+- `get_scripts_by_category()` - Group scripts by category
+- `categorize(filename)` - Determine script category
+
 ### `bigtable_writer.py` - Bigtable Storage
 **Tables:**
 - `btc_15m_snapshot`, `btc_1h_snapshot`, `btc_4h_snapshot`, `btc_d1_snapshot`
@@ -377,27 +414,33 @@ Config loading priority:
 ./scripts/setup.sh
 source .venv/bin/activate
 
+# Install package in editable mode (enables imports without PYTHONPATH)
+uv pip install -e .
+
+# Launch TUI script launcher
+poly-tui
+
 # Run tests
 pytest tests/ -v
 
 # Run collector locally
-PYTHONPATH=src python scripts/cloudrun_collector.py
+python scripts/cloudrun_collector.py
 
 # Test Polymarket API
-PYTHONPATH=src python scripts/test_polymarket_api.py --wallet 0x...
+python scripts/test_polymarket_api.py --wallet 0x...
 
 # Test WebSocket feed
-PYTHONPATH=src python scripts/test_polymarket_ws.py --duration 10
+python scripts/test_polymarket_ws.py --duration 10
 
 # Test market feed daemon
-PYTHONPATH=src python scripts/test_market_feed.py --duration 10
+python scripts/test_market_feed.py --duration 10
 
 # Run trading bot (uses config/poly.json automatically)
-PYTHONPATH=src python scripts/run_trading_bot.py
+python scripts/run_trading_bot.py
 
 # Run trading bot with CLI overrides
-PYTHONPATH=src python scripts/run_trading_bot.py --asset eth --interval 5
+python scripts/run_trading_bot.py --asset eth --interval 5
 
 # Benchmark API latency
-PYTHONPATH=src python scripts/benchmark_polymarket_apis.py
+python scripts/benchmark_polymarket_apis.py
 ```

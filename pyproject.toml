@@ -27,6 +27,7 @@ dependencies = [
     "aiohttp>=3.9.0",
     "python-dotenv>=1.0.0",
     "pydantic>=2.0.0",
+    "textual>=0.45.0",
 ]
 
 [project.optional-dependencies]
@@ -40,7 +41,7 @@ dev = [
 ]
 
 [project.scripts]
-poly = "poly.scripts.run:main"
+poly-tui = "poly.tui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

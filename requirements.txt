@@ -32,6 +32,9 @@ google-cloud-bigtable>=2.21.0
 tenacity>=8.2.0
 python-dateutil>=2.8.0
 
+# TUI
+textual>=0.45.0
+
 # Development
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
