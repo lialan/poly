@@ -26,6 +26,8 @@ from google.cloud.bigtable import column_family, row_filters
 # Table names - BTC
 TABLE_BTC_15M = "btc_15m_snapshot"
 TABLE_BTC_1H = "btc_1h_snapshot"
+TABLE_BTC_4H = "btc_4h_snapshot"
+TABLE_BTC_D1 = "btc_d1_snapshot"
 
 # Table names - ETH
 TABLE_ETH_15M = "eth_15m_snapshot"
@@ -122,6 +124,8 @@ class BigtableWriter:
             # BTC
             TABLE_BTC_15M,
             TABLE_BTC_1H,
+            TABLE_BTC_4H,
+            TABLE_BTC_D1,
             # ETH
             TABLE_ETH_15M,
             TABLE_ETH_1H,

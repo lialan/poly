@@ -32,6 +32,7 @@ class MarketHorizon(Enum):
     M15 = 900       # 15 minutes
     H1 = 3600       # 1 hour
     H4 = 14400      # 4 hours
+    D1 = 86400      # 1 day
 
 
 @dataclass
@@ -171,6 +172,36 @@ def datetime_to_slug_1h(asset: Asset, dt: datetime) -> str:
     return f"{asset_name}-up-or-down-{month}-{day}-{hour_str}-et"
 
 
+def datetime_to_slug_d1(asset: Asset, dt: datetime) -> str:
+    """Convert a datetime (in ET) to daily market slug.
+
+    Daily markets resolve at noon ET comparing to previous day noon.
+    Slug format: bitcoin-up-or-down-on-january-7
+    """
+    month = MONTHS[dt.month - 1]
+    day = dt.day
+
+    # BTC uses "bitcoin", ETH uses "ethereum"
+    asset_name = "bitcoin" if asset == Asset.BTC else "ethereum"
+    return f"{asset_name}-up-or-down-on-{month}-{day}"
+
+
+def get_current_day_et() -> datetime:
+    """Get the current day in ET timezone (UTC-5), aligned to noon."""
+    utc_now = datetime.now(timezone.utc)
+    et_offset = timedelta(hours=-5)
+    et_now = utc_now + et_offset
+
+    # If before noon ET, we're in yesterday's market (resolving at today's noon)
+    # If after noon ET, we're in today's market (resolving at tomorrow's noon)
+    if et_now.hour < 12:
+        # Current market resolves today at noon
+        return et_now.replace(hour=12, minute=0, second=0, microsecond=0)
+    else:
+        # Current market resolves tomorrow at noon
+        return (et_now + timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
+
+
 def get_current_slug(asset: Asset, horizon: MarketHorizon) -> str:
     """Get the slug for the current market slot.
 
@@ -185,6 +216,9 @@ def get_current_slug(asset: Asset, horizon: MarketHorizon) -> str:
         et_now = get_current_hour_et()
         resolution_hour = et_now + timedelta(hours=1)
         return datetime_to_slug_1h(asset, resolution_hour)
+    elif horizon == MarketHorizon.D1:
+        resolution_day = get_current_day_et()
+        return datetime_to_slug_d1(asset, resolution_day)
     else:  # M15 or H4
         timestamp = get_current_slot_timestamp(horizon)
         return timestamp_to_slug(asset, horizon, timestamp)

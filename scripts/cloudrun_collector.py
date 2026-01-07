@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from poly.db_writer import get_db_writer
 from poly.binance_price import get_btc_price, get_eth_price
 from poly.bigtable_writer import (
-    TABLE_BTC_15M, TABLE_BTC_1H,
+    TABLE_BTC_15M, TABLE_BTC_1H, TABLE_BTC_4H, TABLE_BTC_D1,
     TABLE_ETH_15M, TABLE_ETH_1H, TABLE_ETH_4H,
 )
 from poly.markets import (
@@ -91,11 +91,12 @@ class MarketType:
 
     @property
     def horizon_str(self) -> str:
-        """Short horizon string (15m, 1h, 4h)."""
+        """Short horizon string (15m, 1h, 4h, d1)."""
         return {
             MarketHorizon.M15: "15m",
             MarketHorizon.H1: "1h",
             MarketHorizon.H4: "4h",
+            MarketHorizon.D1: "d1",
         }[self.horizon]
 
     def process_snapshot(
@@ -122,6 +123,8 @@ class MarketType:
 BTC_MARKETS = [
     MarketType("BTC-15m", TABLE_BTC_15M, Asset.BTC, MarketHorizon.M15),
     MarketType("BTC-1h", TABLE_BTC_1H, Asset.BTC, MarketHorizon.H1),
+    MarketType("BTC-4h", TABLE_BTC_4H, Asset.BTC, MarketHorizon.H4),
+    MarketType("BTC-d1", TABLE_BTC_D1, Asset.BTC, MarketHorizon.D1),
 ]
 
 ETH_MARKETS = [
