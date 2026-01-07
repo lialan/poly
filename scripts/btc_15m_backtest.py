@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """BTC 15m backtest - Compare real data to Monte Carlo theory.
 
-Fetches last 12 hours of BTC 15-minute market data from Bigtable,
+Fetches all available BTC 15-minute market data from Bigtable,
 analyzes outcomes, and compares to theoretical predictions.
 """
 
@@ -29,23 +29,24 @@ class Snapshot:
     yes_mid: float
 
 
-def fetch_snapshots(hours: int = 12) -> list[Snapshot]:
-    """Fetch btc_15m_snapshot data from Bigtable."""
+def fetch_snapshots() -> list[Snapshot]:
+    """Fetch all btc_15m_snapshot data from Bigtable."""
     client = bigtable.Client(project="poly-collector", admin=True)
     table = client.instance("poly-data").table("btc_15m_snapshot")
-    cutoff_ts = (datetime.now(timezone.utc) - timedelta(hours=hours)).timestamp()
 
     snapshots = []
-    for row in table.read_rows(limit=50000):
+    row_count = 0
+    for row in table.read_rows():  # No limit - fetch all
+        row_count += 1
+        if row_count % 10000 == 0:
+            print(f"  ... {row_count} rows fetched")
+
         cells = row.cells.get("data", {})
         get = lambda k: cells[k][0].value.decode() if k in cells else ""
 
         ts_str = get(b"ts")
         if not ts_str:
             continue
-        ts = float(ts_str)
-        if ts < cutoff_ts:
-            break
 
         market_id = get(b"market_id")
         price_str = get(b"spot_price")
@@ -65,7 +66,7 @@ def fetch_snapshots(hours: int = 12) -> list[Snapshot]:
                 pass
 
         snapshots.append(Snapshot(
-            timestamp=datetime.fromtimestamp(ts, tz=timezone.utc),
+            timestamp=datetime.fromtimestamp(float(ts_str), tz=timezone.utc),
             market_id=market_id,
             btc_price=float(price_str),
             yes_mid=yes_mid,
@@ -143,14 +144,23 @@ def main():
     print("=" * 60)
 
     # Fetch and analyze
-    print("\nFetching from Bigtable...")
-    snapshots = fetch_snapshots(hours=12)
+    print("\nFetching all data from Bigtable...")
+    snapshots = fetch_snapshots()
     if not snapshots:
         print("No data found!")
         return
 
     outcomes = analyze_outcomes(snapshots)
-    print(f"  {len(snapshots)} snapshots, {len(outcomes)} markets")
+
+    # Calculate time range
+    if outcomes:
+        times = [o['time'] for o in outcomes]
+        earliest = min(times)
+        latest = max(times)
+        duration = latest - earliest
+        hours = duration.total_seconds() / 3600
+        print(f"  {len(snapshots)} snapshots, {len(outcomes)} markets")
+        print(f"  Time range: {earliest.strftime('%Y-%m-%d %H:%M')} to {latest.strftime('%Y-%m-%d %H:%M')} ({hours:.1f} hours)")
 
     # Recent outcomes
     print("\n" + "-" * 60)
@@ -187,9 +197,9 @@ def main():
     # Summary
     up = sum(1 for o in outcomes if o['up'])
     print("\n" + "=" * 60)
-    print("SUMMARY (last 12h)")
+    print("SUMMARY")
     print("=" * 60)
-    print(f"  Markets: {len(outcomes)}")
+    print(f"  Total markets: {len(outcomes)}")
     print(f"  Up: {up} ({up/len(outcomes)*100:.1f}%)")
     print(f"  Down: {len(outcomes)-up} ({(len(outcomes)-up)/len(outcomes)*100:.1f}%)")
     print(f"  Avg change: {np.mean([o['pct_change'] for o in outcomes]):+.3f}%")
