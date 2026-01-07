@@ -33,42 +33,48 @@ class OrderLevel:
 
 @dataclass
 class MarketSnapshot:
-    """Snapshot of market orderbook state."""
+    """Minimal snapshot of market orderbook state.
+
+    Contains only non-derivable data:
+    - timestamp: when snapshot was taken
+    - market_id: slug (encodes resolution time)
+    - btc_price: BTC price at snapshot time
+    - yes_bids/asks: full YES token orderbook
+    - no_bids/asks: full NO token orderbook
+
+    All other fields (best prices, mid, spread, resolution_time)
+    can be derived from these.
+    """
 
     timestamp: float
     market_id: str
-    resolution_time: datetime
+    btc_price: Decimal
+    yes_bids: list[OrderLevel] = field(default_factory=list)
+    yes_asks: list[OrderLevel] = field(default_factory=list)
+    no_bids: list[OrderLevel] = field(default_factory=list)
+    no_asks: list[OrderLevel] = field(default_factory=list)
 
-    # Best bid/ask for YES token
-    best_yes_bid: Optional[Decimal] = None
-    best_yes_ask: Optional[Decimal] = None
-
-    # Best bid/ask for NO token
-    best_no_bid: Optional[Decimal] = None
-    best_no_ask: Optional[Decimal] = None
-
-    # Orderbook depth - separate bids and asks
-    depth_yes_bids: list[OrderLevel] = field(default_factory=list)
-    depth_yes_asks: list[OrderLevel] = field(default_factory=list)
-    depth_no_bids: list[OrderLevel] = field(default_factory=list)
-    depth_no_asks: list[OrderLevel] = field(default_factory=list)
-
-    # Volume (from Gamma API - total market volume, not 1m/5m)
-    volume_total: Decimal = Decimal("0")
-
-    # Token IDs for reference
-    yes_token_id: str = ""
-    no_token_id: str = ""
+    # --- Derived properties ---
 
     @property
-    def depth_yes(self) -> list[tuple[float, float]]:
-        """Combined YES depth as (price, size) tuples."""
-        return [(float(l.price), float(l.size)) for l in self.depth_yes_bids + self.depth_yes_asks]
+    def best_yes_bid(self) -> Optional[Decimal]:
+        """Best (highest) YES bid price."""
+        return self.yes_bids[-1].price if self.yes_bids else None
 
     @property
-    def depth_no(self) -> list[tuple[float, float]]:
-        """Combined NO depth as (price, size) tuples."""
-        return [(float(l.price), float(l.size)) for l in self.depth_no_bids + self.depth_no_asks]
+    def best_yes_ask(self) -> Optional[Decimal]:
+        """Best (lowest) YES ask price."""
+        return self.yes_asks[-1].price if self.yes_asks else None
+
+    @property
+    def best_no_bid(self) -> Optional[Decimal]:
+        """Best (highest) NO bid price."""
+        return self.no_bids[-1].price if self.no_bids else None
+
+    @property
+    def best_no_ask(self) -> Optional[Decimal]:
+        """Best (lowest) NO ask price."""
+        return self.no_asks[-1].price if self.no_asks else None
 
     @property
     def yes_mid(self) -> Optional[Decimal]:
@@ -101,12 +107,20 @@ class MarketSnapshot:
     @property
     def yes_depth_total(self) -> Decimal:
         """Total size in YES orderbook."""
-        return sum((level.size for level in self.depth_yes_bids + self.depth_yes_asks), Decimal("0"))
+        return sum((level.size for level in self.yes_bids + self.yes_asks), Decimal("0"))
 
     @property
     def no_depth_total(self) -> Decimal:
         """Total size in NO orderbook."""
-        return sum((level.size for level in self.depth_no_bids + self.depth_no_asks), Decimal("0"))
+        return sum((level.size for level in self.no_bids + self.no_asks), Decimal("0"))
+
+    @property
+    def resolution_time(self) -> Optional[datetime]:
+        """Derive resolution time from market_id (slug)."""
+        ts = slug_to_timestamp(self.market_id)
+        if ts:
+            return datetime.fromtimestamp(ts + INTERVAL_SECONDS, tz=timezone.utc)
+        return None
 
 
 async def fetch_orderbook(
@@ -120,6 +134,7 @@ async def fetch_orderbook(
 
     Returns:
         Tuple of (bids, asks) as OrderLevel lists.
+        Bids sorted ascending (best = last), asks sorted descending (best = last).
     """
     url = f"{CLOB_API_BASE}/book"
     params = {"token_id": token_id}
@@ -154,12 +169,14 @@ async def fetch_orderbook(
 
 async def fetch_market_snapshot(
     market_id: str,
+    btc_price: Decimal,
     prediction: Optional[BTC15mPrediction] = None,
 ) -> Optional[MarketSnapshot]:
     """Fetch market snapshot for a BTC 15m prediction market.
 
     Args:
         market_id: Market ID (can be slug, event_id, or timestamp).
+        btc_price: Current BTC price.
         prediction: Optional pre-fetched BTC15mPrediction.
 
     Returns:
@@ -182,49 +199,30 @@ async def fetch_market_snapshot(
 
     # Fetch orderbooks for both tokens in parallel
     async with aiohttp.ClientSession() as session:
-        yes_task = fetch_orderbook(session, prediction.up_token_id)
-        no_task = fetch_orderbook(session, prediction.down_token_id)
-
         (yes_bids, yes_asks), (no_bids, no_asks) = await asyncio.gather(
-            yes_task, no_task
+            fetch_orderbook(session, prediction.up_token_id),
+            fetch_orderbook(session, prediction.down_token_id),
         )
 
-    # Calculate resolution time from slug
-    ts = slug_to_timestamp(prediction.slug)
-    resolution_time = (
-        datetime.fromtimestamp(ts + INTERVAL_SECONDS, tz=timezone.utc)
-        if ts
-        else prediction.end_time
-    )
-
-    # CLOB API returns bids ascending (worst to best) and asks descending (worst to best)
-    # So best bid = last element (highest price), best ask = last element (lowest price)
     return MarketSnapshot(
         timestamp=time.time(),
         market_id=prediction.slug,
-        resolution_time=resolution_time,
-        # YES (UP) token - use last element for best prices
-        best_yes_bid=yes_bids[-1].price if yes_bids else None,
-        best_yes_ask=yes_asks[-1].price if yes_asks else None,
-        depth_yes_bids=yes_bids,  # All bid levels
-        depth_yes_asks=yes_asks,  # All ask levels
-        # NO (DOWN) token - use last element for best prices
-        best_no_bid=no_bids[-1].price if no_bids else None,
-        best_no_ask=no_asks[-1].price if no_asks else None,
-        depth_no_bids=no_bids,
-        depth_no_asks=no_asks,
-        # Volume from Gamma API
-        volume_total=prediction.volume,
-        # Token IDs
-        yes_token_id=prediction.up_token_id,
-        no_token_id=prediction.down_token_id,
+        btc_price=btc_price,
+        yes_bids=yes_bids,
+        yes_asks=yes_asks,
+        no_bids=no_bids,
+        no_asks=no_asks,
     )
 
 
-async def fetch_current_snapshot() -> Optional[MarketSnapshot]:
-    """Fetch snapshot for the current 15-minute slot."""
+async def fetch_current_snapshot(btc_price: Decimal) -> Optional[MarketSnapshot]:
+    """Fetch snapshot for the current 15-minute slot.
+
+    Args:
+        btc_price: Current BTC price.
+    """
     timestamp = get_current_slot_timestamp()
-    return await fetch_market_snapshot(str(timestamp))
+    return await fetch_market_snapshot(str(timestamp), btc_price)
 
 
 def print_snapshot(snapshot: MarketSnapshot) -> None:
@@ -234,8 +232,10 @@ def print_snapshot(snapshot: MarketSnapshot) -> None:
     print("=" * 70)
 
     print(f"\nMarket: {snapshot.market_id}")
-    print(f"Resolution: {snapshot.resolution_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    if snapshot.resolution_time:
+        print(f"Resolution: {snapshot.resolution_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     print(f"Snapshot Time: {datetime.fromtimestamp(snapshot.timestamp, tz=timezone.utc).strftime('%H:%M:%S %Z')}")
+    print(f"BTC Price: ${float(snapshot.btc_price):,.2f}")
 
     print("\n--- YES (UP) Token ---")
     if snapshot.best_yes_bid or snapshot.best_yes_ask:
@@ -245,13 +245,9 @@ def print_snapshot(snapshot: MarketSnapshot) -> None:
         spread_str = f"{float(snapshot.yes_spread):.4f}" if snapshot.yes_spread else "N/A"
         print(f"  Best Bid: {bid_str}  |  Best Ask: {ask_str}")
         print(f"  Mid: {mid_str}  |  Spread: {spread_str}")
+        print(f"  Depth: {len(snapshot.yes_bids)} bid levels, {len(snapshot.yes_asks)} ask levels")
     else:
         print("  No orderbook data")
-
-    # Print YES depth
-    if snapshot.depth_yes_bids or snapshot.depth_yes_asks:
-        print(f"  Depth: {len(snapshot.depth_yes_bids)} bid levels, {len(snapshot.depth_yes_asks)} ask levels")
-        print(f"  Total Depth Size: {float(snapshot.yes_depth_total):.2f}")
 
     print("\n--- NO (DOWN) Token ---")
     if snapshot.best_no_bid or snapshot.best_no_ask:
@@ -261,13 +257,8 @@ def print_snapshot(snapshot: MarketSnapshot) -> None:
         spread_str = f"{float(snapshot.no_spread):.4f}" if snapshot.no_spread else "N/A"
         print(f"  Best Bid: {bid_str}  |  Best Ask: {ask_str}")
         print(f"  Mid: {mid_str}  |  Spread: {spread_str}")
+        print(f"  Depth: {len(snapshot.no_bids)} bid levels, {len(snapshot.no_asks)} ask levels")
     else:
         print("  No orderbook data")
 
-    # Print NO depth
-    if snapshot.depth_no_bids or snapshot.depth_no_asks:
-        print(f"  Depth: {len(snapshot.depth_no_bids)} bid levels, {len(snapshot.depth_no_asks)} ask levels")
-        print(f"  Total Depth Size: {float(snapshot.no_depth_total):.2f}")
-
-    print(f"\nTotal Volume: ${float(snapshot.volume_total):,.2f}")
     print("\n" + "=" * 70)

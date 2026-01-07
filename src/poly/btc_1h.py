@@ -1,9 +1,9 @@
-"""Bitcoin 15-minute prediction market utilities."""
+"""Bitcoin 1-hour prediction market utilities."""
 
 import asyncio
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import Optional
 
@@ -11,12 +11,18 @@ import aiohttp
 
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 POLYMARKET_BASE = "https://polymarket.com"
-INTERVAL_SECONDS = 900  # 15 minutes
+INTERVAL_SECONDS = 3600  # 1 hour
+
+# Months for slug generation
+MONTHS = [
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december"
+]
 
 
 @dataclass
-class BTC15mPrediction:
-    """Represents a 15-minute BTC Up/Down prediction market."""
+class BTC1hPrediction:
+    """Represents a 1-hour BTC Up/Down prediction market."""
 
     slug: str
     event_id: str
@@ -48,86 +54,103 @@ class BTC15mPrediction:
         return float(self.down_price) * 100
 
     @property
+    def resolution_time(self) -> Optional[datetime]:
+        """Get the resolution time (end of the 1-hour candle)."""
+        return self.end_time
+
+    @property
     def time_remaining(self) -> float:
-        """Get seconds remaining until this slot ends."""
-        ts = slug_to_timestamp(self.slug)
-        if ts:
-            slot_end = datetime.fromtimestamp(ts + INTERVAL_SECONDS, tz=timezone.utc)
+        """Get seconds remaining until this market resolves."""
+        if self.end_time:
             now = datetime.now(timezone.utc)
-            return (slot_end - now).total_seconds()
+            return (self.end_time - now).total_seconds()
         return 0
 
     @property
     def is_live(self) -> bool:
         """Check if market is currently in its trading window."""
-        now = datetime.now(timezone.utc)
-        # Use slug timestamp as authoritative start time
-        ts = slug_to_timestamp(self.slug)
-        if ts:
-            slot_start = datetime.fromtimestamp(ts, tz=timezone.utc)
-            slot_end = datetime.fromtimestamp(ts + INTERVAL_SECONDS, tz=timezone.utc)
-            return slot_start <= now < slot_end and self.active and not self.closed
         return self.active and not self.closed
 
 
-def get_current_slot_timestamp() -> int:
-    """Get the Unix timestamp for the current 15-minute slot."""
-    now = int(time.time())
-    return (now // INTERVAL_SECONDS) * INTERVAL_SECONDS
+def get_current_hour_et() -> datetime:
+    """Get the current hour in ET timezone."""
+    # ET is UTC-5 (EST) or UTC-4 (EDT)
+    # For simplicity, we'll use UTC-5 (EST)
+    utc_now = datetime.now(timezone.utc)
+    et_offset = timedelta(hours=-5)
+    et_now = utc_now + et_offset
+    # Round down to the current hour
+    return et_now.replace(minute=0, second=0, microsecond=0)
 
 
-def get_slot_timestamps(count: int = 5, include_current: bool = True) -> list[int]:
-    """Get timestamps for current and upcoming 15-minute slots.
+def datetime_to_slug(dt: datetime) -> str:
+    """Convert a datetime to 1h BTC market slug.
+
+    Args:
+        dt: Datetime in ET timezone (hour should be the resolution hour)
+
+    Returns:
+        Slug like 'bitcoin-up-or-down-january-6-9pm-et'
+    """
+    month = MONTHS[dt.month - 1]
+    day = dt.day
+    hour = dt.hour
+
+    if hour == 0:
+        hour_str = "12am"
+    elif hour < 12:
+        hour_str = f"{hour}am"
+    elif hour == 12:
+        hour_str = "12pm"
+    else:
+        hour_str = f"{hour - 12}pm"
+
+    return f"bitcoin-up-or-down-{month}-{day}-{hour_str}-et"
+
+
+def get_current_slot_slug() -> str:
+    """Get the slug for the current 1-hour slot."""
+    et_now = get_current_hour_et()
+    # The market resolves at the END of the hour, so current hour's market
+    # is the one that resolves at the next hour
+    resolution_hour = et_now + timedelta(hours=1)
+    return datetime_to_slug(resolution_hour)
+
+
+def get_slot_slugs(count: int = 3, include_current: bool = True) -> list[str]:
+    """Get slugs for current and upcoming 1-hour slots.
 
     Args:
         count: Number of slots to return.
         include_current: Whether to include the current slot.
 
     Returns:
-        List of Unix timestamps.
+        List of slugs.
     """
-    current = get_current_slot_timestamp()
-    start = current if include_current else current + INTERVAL_SECONDS
-    return [start + (i * INTERVAL_SECONDS) for i in range(count)]
+    et_now = get_current_hour_et()
+    start_offset = 1 if include_current else 2  # +1 because resolution is next hour
+
+    slugs = []
+    for i in range(count):
+        resolution_hour = et_now + timedelta(hours=start_offset + i)
+        slugs.append(datetime_to_slug(resolution_hour))
+
+    return slugs
 
 
-def timestamp_to_slug(timestamp: int) -> str:
-    """Convert Unix timestamp to BTC 15m market slug."""
-    return f"btc-updown-15m-{timestamp}"
-
-
-def slug_to_timestamp(slug: str) -> Optional[int]:
-    """Extract Unix timestamp from BTC 15m market slug."""
-    try:
-        parts = slug.split("-")
-        return int(parts[-1])
-    except (IndexError, ValueError):
-        return None
-
-
-def timestamp_to_url(timestamp: int) -> str:
-    """Convert Unix timestamp to Polymarket URL."""
-    slug = timestamp_to_slug(timestamp)
-    return f"{POLYMARKET_BASE}/event/{slug}"
-
-
-async def fetch_btc_15m_prediction(timestamp: int) -> Optional[BTC15mPrediction]:
-    """Fetch a specific 15-minute BTC prediction market.
+async def fetch_btc_1h_prediction(slug: str) -> Optional[BTC1hPrediction]:
+    """Fetch a specific 1-hour BTC prediction market.
 
     Args:
-        timestamp: Unix timestamp for the 15-minute slot.
+        slug: Market slug like 'bitcoin-up-or-down-january-6-9pm-et'
 
     Returns:
-        BTC15mPrediction object or None if not found.
+        BTC1hPrediction object or None if not found.
     """
-    slug = timestamp_to_slug(timestamp)
     url = f"{GAMMA_API_BASE}/events?slug={slug}"
 
-    # Disable brotli to avoid aiohttp compatibility issues
-    headers = {"Accept-Encoding": "gzip, deflate"}
-
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as response:
+        async with session.get(url) as response:
             if response.status != 200:
                 return None
 
@@ -136,38 +159,40 @@ async def fetch_btc_15m_prediction(timestamp: int) -> Optional[BTC15mPrediction]
                 return None
 
             event = data[0] if isinstance(data, list) else data
-            return _parse_btc_15m_event(event)
+            return _parse_btc_1h_event(event)
 
 
-async def fetch_current_and_upcoming(count: int = 5) -> list[BTC15mPrediction]:
-    """Fetch current and upcoming BTC 15-minute predictions.
+async def fetch_current_1h_prediction() -> Optional[BTC1hPrediction]:
+    """Fetch the current 1-hour BTC prediction market."""
+    slug = get_current_slot_slug()
+    return await fetch_btc_1h_prediction(slug)
+
+
+async def fetch_current_and_upcoming_1h(count: int = 3) -> list[BTC1hPrediction]:
+    """Fetch current and upcoming 1-hour BTC predictions.
 
     Args:
         count: Number of predictions to fetch (including current).
 
     Returns:
-        List of BTC15mPrediction objects.
+        List of BTC1hPrediction objects.
     """
-    timestamps = get_slot_timestamps(count)
+    slugs = get_slot_slugs(count)
 
-    # Disable brotli to avoid aiohttp compatibility issues
-    headers = {"Accept-Encoding": "gzip, deflate"}
-
-    async with aiohttp.ClientSession(headers=headers) as session:
-        tasks = [_fetch_single(session, ts) for ts in timestamps]
+    async with aiohttp.ClientSession() as session:
+        tasks = [_fetch_single(session, slug) for slug in slugs]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
     predictions = []
     for result in results:
-        if isinstance(result, BTC15mPrediction):
+        if isinstance(result, BTC1hPrediction):
             predictions.append(result)
 
     return predictions
 
 
-async def _fetch_single(session: aiohttp.ClientSession, timestamp: int) -> Optional[BTC15mPrediction]:
+async def _fetch_single(session: aiohttp.ClientSession, slug: str) -> Optional[BTC1hPrediction]:
     """Fetch a single prediction using existing session."""
-    slug = timestamp_to_slug(timestamp)
     url = f"{GAMMA_API_BASE}/events?slug={slug}"
 
     try:
@@ -180,7 +205,7 @@ async def _fetch_single(session: aiohttp.ClientSession, timestamp: int) -> Optio
                 return None
 
             event = data[0] if isinstance(data, list) else data
-            return _parse_btc_15m_event(event)
+            return _parse_btc_1h_event(event)
     except Exception:
         return None
 
@@ -198,8 +223,8 @@ def _parse_json_field(value, default=None):
     return value
 
 
-def _parse_btc_15m_event(data: dict) -> Optional[BTC15mPrediction]:
-    """Parse BTC 15m event data from API response."""
+def _parse_btc_1h_event(data: dict) -> Optional[BTC1hPrediction]:
+    """Parse BTC 1h event data from API response."""
     markets = data.get("markets", [])
     if not markets:
         return None
@@ -239,15 +264,7 @@ def _parse_btc_15m_event(data: dict) -> Optional[BTC15mPrediction]:
         except ValueError:
             pass
 
-    if not start_time or not end_time:
-        # Fallback: derive from slug timestamp
-        slug = data.get("slug", "")
-        ts = slug_to_timestamp(slug)
-        if ts:
-            start_time = datetime.fromtimestamp(ts, tz=timezone.utc)
-            end_time = datetime.fromtimestamp(ts + INTERVAL_SECONDS, tz=timezone.utc)
-
-    return BTC15mPrediction(
+    return BTC1hPrediction(
         slug=data.get("slug", ""),
         event_id=str(data.get("id", "")),
         title=data.get("title", ""),
@@ -264,10 +281,10 @@ def _parse_btc_15m_event(data: dict) -> Optional[BTC15mPrediction]:
     )
 
 
-def print_predictions(predictions: list[BTC15mPrediction]) -> None:
+def print_predictions(predictions: list[BTC1hPrediction]) -> None:
     """Print predictions in a formatted table."""
     print("\n" + "=" * 80)
-    print("BTC 15-Minute Predictions")
+    print("BTC 1-Hour Predictions")
     print("=" * 80)
 
     for i, pred in enumerate(predictions):
@@ -275,8 +292,12 @@ def print_predictions(predictions: list[BTC15mPrediction]) -> None:
         remaining = pred.time_remaining
 
         if remaining > 0:
-            mins, secs = divmod(int(remaining), 60)
-            time_str = f"{mins}m {secs}s remaining"
+            hours, remainder = divmod(int(remaining), 3600)
+            mins, secs = divmod(remainder, 60)
+            if hours > 0:
+                time_str = f"{hours}h {mins}m remaining"
+            else:
+                time_str = f"{mins}m {secs}s remaining"
         else:
             time_str = "Ended"
 

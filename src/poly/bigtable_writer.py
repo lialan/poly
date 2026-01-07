@@ -24,7 +24,8 @@ from google.cloud import bigtable
 from google.cloud.bigtable import column_family, row_filters
 
 # Table names
-TABLE_SNAPSHOTS = "market_snapshots"
+TABLE_SNAPSHOTS_15M = "btc_15m_snapshot"
+TABLE_SNAPSHOTS_1H = "btc_1h_snapshot"
 TABLE_OPPORTUNITIES = "opportunities"
 TABLE_TRADES = "simulated_trades"
 TABLE_EQUITY = "equity_curve"
@@ -107,7 +108,8 @@ class BigtableWriter:
         self._get_client()
 
         tables_to_create = [
-            TABLE_SNAPSHOTS,
+            TABLE_SNAPSHOTS_15M,
+            TABLE_SNAPSHOTS_1H,
             TABLE_OPPORTUNITIES,
             TABLE_TRADES,
             TABLE_EQUITY,
@@ -188,18 +190,25 @@ class BigtableWriter:
     def write_snapshot(
         self,
         market_id: str,
-        horizon: str,
-        yes_bid: Optional[float],
-        yes_ask: Optional[float],
-        no_bid: Optional[float],
-        no_ask: Optional[float],
-        btc_price: Optional[float] = None,
-        depth_json: Optional[str] = None,
+        btc_price: float,
+        orderbook_json: str,
         ts: Optional[float] = None,
+        table_name: str = TABLE_SNAPSHOTS_15M,
     ) -> None:
-        """Write a market snapshot."""
+        """Write a market snapshot (minimal format).
+
+        Stores only non-derivable data:
+        - timestamp, market_id, btc_price, orderbook
+
+        Args:
+            market_id: Market identifier/slug.
+            btc_price: BTC price at snapshot time.
+            orderbook_json: JSON string with yes_bids, yes_asks, no_bids, no_asks.
+            ts: Timestamp (default: now).
+            table_name: Bigtable table name (default: market_snapshots).
+        """
         ts = ts or time.time()
-        table = self._get_table(TABLE_SNAPSHOTS)
+        table = self._get_table(table_name)
 
         # Row key: inverted_timestamp#market_id (for reverse chronological order)
         row_key = self._ts_to_bytes(ts) + b"#" + market_id.encode("utf-8")
@@ -207,36 +216,34 @@ class BigtableWriter:
         row = table.direct_row(row_key)
         row.set_cell(CF_DATA, b"ts", self._encode_value(ts))
         row.set_cell(CF_DATA, b"market_id", self._encode_value(market_id))
-        row.set_cell(CF_DATA, b"horizon", self._encode_value(horizon))
-        row.set_cell(CF_DATA, b"yes_bid", self._encode_value(yes_bid))
-        row.set_cell(CF_DATA, b"yes_ask", self._encode_value(yes_ask))
-        row.set_cell(CF_DATA, b"no_bid", self._encode_value(no_bid))
-        row.set_cell(CF_DATA, b"no_ask", self._encode_value(no_ask))
         row.set_cell(CF_DATA, b"btc_price", self._encode_value(btc_price))
-        row.set_cell(CF_DATA, b"depth_json", self._encode_value(depth_json))
+        row.set_cell(CF_DATA, b"orderbook", self._encode_value(orderbook_json))
         row.commit()
 
     def write_snapshot_from_obj(
-        self, snapshot, horizon: str = "15m", btc_price: Optional[float] = None
+        self,
+        snapshot,
+        table_name: str = TABLE_SNAPSHOTS_15M,
     ) -> None:
-        """Write a MarketSnapshot object to database."""
-        depth_data = {
-            "yes_bids": [(float(l.price), float(l.size)) for l in snapshot.depth_yes_bids],
-            "yes_asks": [(float(l.price), float(l.size)) for l in snapshot.depth_yes_asks],
-            "no_bids": [(float(l.price), float(l.size)) for l in snapshot.depth_no_bids],
-            "no_asks": [(float(l.price), float(l.size)) for l in snapshot.depth_no_asks],
+        """Write a MarketSnapshot object to database.
+
+        Args:
+            snapshot: MarketSnapshot object (contains btc_price).
+            table_name: Bigtable table name.
+        """
+        orderbook_data = {
+            "yes_bids": [(float(l.price), float(l.size)) for l in snapshot.yes_bids],
+            "yes_asks": [(float(l.price), float(l.size)) for l in snapshot.yes_asks],
+            "no_bids": [(float(l.price), float(l.size)) for l in snapshot.no_bids],
+            "no_asks": [(float(l.price), float(l.size)) for l in snapshot.no_asks],
         }
 
         self.write_snapshot(
             market_id=snapshot.market_id,
-            horizon=horizon,
-            yes_bid=float(snapshot.best_yes_bid) if snapshot.best_yes_bid else None,
-            yes_ask=float(snapshot.best_yes_ask) if snapshot.best_yes_ask else None,
-            no_bid=float(snapshot.best_no_bid) if snapshot.best_no_bid else None,
-            no_ask=float(snapshot.best_no_ask) if snapshot.best_no_ask else None,
-            btc_price=btc_price,
-            depth_json=json.dumps(depth_data),
+            btc_price=float(snapshot.btc_price),
+            orderbook_json=json.dumps(orderbook_data),
             ts=snapshot.timestamp,
+            table_name=table_name,
         )
 
     # --- Opportunities ---
@@ -332,24 +339,22 @@ class BigtableWriter:
     def get_snapshots(
         self,
         market_id: Optional[str] = None,
-        horizon: Optional[str] = None,
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         limit: int = 1000,
+        table_name: str = TABLE_SNAPSHOTS_15M,
     ) -> list[dict]:
-        """Query market snapshots."""
-        table = self._get_table(TABLE_SNAPSHOTS)
+        """Query market snapshots.
+
+        Returns minimal data: ts, market_id, btc_price, orderbook (JSON).
+        """
+        table = self._get_table(table_name)
 
         columns = {
             "ts": float,
             "market_id": str,
-            "horizon": str,
-            "yes_bid": float,
-            "yes_ask": float,
-            "no_bid": float,
-            "no_ask": float,
             "btc_price": float,
-            "depth_json": str,
+            "orderbook": str,
         }
 
         # Build row key range for time filtering
@@ -371,8 +376,6 @@ class BigtableWriter:
 
             # Apply filters
             if market_id and data.get("market_id") != market_id:
-                continue
-            if horizon and data.get("horizon") != horizon:
                 continue
 
             results.append(data)

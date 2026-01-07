@@ -29,11 +29,17 @@ from .binance_price import (
     TickerPrice,
     TickerStats,
 )
-from .telegram_notifier import (
-    TelegramNotifier,
-    TelegramConfig,
-    escape_markdown,
-)
+# Telegram notifier - optional (requires python-telegram-bot)
+try:
+    from .telegram_notifier import (
+        TelegramNotifier,
+        TelegramConfig,
+        escape_markdown,
+    )
+except ImportError:
+    TelegramNotifier = None
+    TelegramConfig = None
+    escape_markdown = None
 from .market_snapshot import (
     MarketSnapshot,
     OrderLevel,
