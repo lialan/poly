@@ -33,7 +33,7 @@ tenacity>=8.2.0
 python-dateutil>=2.8.0
 
 # TUI
-textual>=0.45.0
+simple-term-menu>=1.6.0
 
 # Development
 pytest>=7.4.0

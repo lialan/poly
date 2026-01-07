@@ -104,13 +104,6 @@ from .project_config import (
     get_config_value,
     ProjectConfig,
 )
-from .script_discovery import (
-    ScriptInfo,
-    discover_scripts,
-    get_scripts_by_category,
-    categorize,
-    CATEGORIES,
-)
 
 # Lazy import for BigtableWriter (requires google-cloud-bigtable)
 def __getattr__(name):
@@ -203,9 +196,4 @@ __all__ = [
     "get_telegram_config",
     "get_config_value",
     "ProjectConfig",
-    "ScriptInfo",
-    "discover_scripts",
-    "get_scripts_by_category",
-    "categorize",
-    "CATEGORIES",
 ]
