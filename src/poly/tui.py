@@ -26,12 +26,12 @@ from textual.widgets import (
     Footer,
     Header,
     Label,
-    ListItem,
-    ListView,
+    OptionList,
     Static,
     TabbedContent,
     TabPane,
 )
+from textual.widgets.option_list import Option
 
 from poly.script_discovery import (
     CATEGORIES,
@@ -42,19 +42,23 @@ from poly.script_discovery import (
 )
 
 
-class ScriptItem(ListItem):
-    """A list item representing a script."""
+class ScriptOptionList(OptionList):
+    """Option list for scripts."""
 
-    def __init__(self, script: ScriptInfo) -> None:
-        super().__init__()
-        self.script = script
+    def __init__(self, scripts: list[ScriptInfo], **kwargs) -> None:
+        self.scripts = scripts
+        options = [
+            Option(f"{s.name}  [dim]{s.short_description}[/dim]", id=s.name)
+            for s in scripts
+        ]
+        super().__init__(*options, **kwargs)
 
-    def compose(self) -> ComposeResult:
-        yield Static(f"[bold]{self.script.name}[/bold]", classes="script-name")
-        yield Static(
-            f"[dim]{self.script.short_description}[/dim]",
-            classes="script-desc",
-        )
+    def get_script_by_name(self, name: str) -> ScriptInfo | None:
+        """Get script by name."""
+        for s in self.scripts:
+            if s.name == name:
+                return s
+        return None
 
 
 class ScriptDetailScreen(ModalScreen[bool]):
@@ -91,26 +95,6 @@ class ScriptDetailScreen(ModalScreen[bool]):
         self.dismiss(True)
 
 
-class ScriptList(ListView):
-    """List view for scripts."""
-
-    def __init__(self, scripts: list[ScriptInfo], **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.scripts = scripts
-
-    def compose(self) -> ComposeResult:
-        for script in self.scripts:
-            yield ScriptItem(script)
-
-    def get_selected_script(self) -> ScriptInfo | None:
-        """Get the currently selected script."""
-        if self.highlighted_child is not None:
-            item = self.highlighted_child
-            if isinstance(item, ScriptItem):
-                return item.script
-        return None
-
-
 class PolyTUI(App):
     """Polymarket Trading Platform TUI Launcher."""
 
@@ -132,31 +116,9 @@ class PolyTUI(App):
         padding: 0 1;
     }
 
-    ScriptList {
+    ScriptOptionList {
         height: 100%;
         border: solid $primary;
-    }
-
-    ScriptItem {
-        padding: 0 1;
-        height: 3;
-    }
-
-    ScriptItem:hover {
-        background: $boost;
-    }
-
-    ScriptItem.-highlight {
-        background: $accent;
-    }
-
-    .script-name {
-        height: 1;
-    }
-
-    .script-desc {
-        height: 1;
-        color: $text-muted;
     }
 
     #empty-message {
@@ -231,7 +193,7 @@ class PolyTUI(App):
         yield Static("", id="status-bar")
         yield Footer()
 
-    def _create_script_list(self, category: str | None) -> ScriptList | Static:
+    def _create_script_list(self, category: str | None) -> ScriptOptionList | Static:
         """Create a script list for a category."""
         if category:
             scripts = self.scripts_by_category.get(category, [])
@@ -244,7 +206,7 @@ class PolyTUI(App):
                 id="empty-message",
             )
 
-        return ScriptList(scripts, id=f"list-{category or 'all'}")
+        return ScriptOptionList(scripts, id=f"list-{category or 'all'}")
 
     def on_mount(self) -> None:
         """Update status on mount."""
@@ -261,13 +223,13 @@ class PolyTUI(App):
         status = self.query_one("#status-bar", Static)
         status.update(f"[dim]{message}[/dim]")
 
-    def _get_current_list(self) -> ScriptList | None:
+    def _get_current_list(self) -> ScriptOptionList | None:
         """Get the currently visible script list."""
         tabbed = self.query_one(TabbedContent)
         active_tab = tabbed.active
         if active_tab:
             try:
-                return self.query_one(f"#{active_tab} ScriptList", ScriptList)
+                return self.query_one(f"#{active_tab} ScriptOptionList", ScriptOptionList)
             except Exception:
                 return None
         return None
@@ -275,8 +237,10 @@ class PolyTUI(App):
     def _get_selected_script(self) -> ScriptInfo | None:
         """Get currently selected script."""
         script_list = self._get_current_list()
-        if script_list:
-            return script_list.get_selected_script()
+        if script_list and script_list.highlighted is not None:
+            option = script_list.get_option_at_index(script_list.highlighted)
+            if option and option.id:
+                return script_list.get_script_by_name(str(option.id))
         return None
 
     async def action_run_script(self) -> None:
