@@ -9,10 +9,12 @@ from typing import Optional
 
 import aiohttp
 
-from .btc_15m import (
-    BTC15mPrediction,
+from .markets import (
+    CryptoPrediction,
+    Asset,
+    MarketHorizon,
     fetch_btc_15m_prediction,
-    get_current_slot_timestamp,
+    get_current_slot_timestamp_15m as get_current_slot_timestamp,
     slug_to_timestamp,
     INTERVAL_SECONDS,
 )
@@ -170,7 +172,7 @@ async def fetch_orderbook(
 async def fetch_market_snapshot(
     market_id: str,
     btc_price: Decimal,
-    prediction: Optional[BTC15mPrediction] = None,
+    prediction: Optional[CryptoPrediction] = None,
 ) -> Optional[MarketSnapshot]:
     """Fetch market snapshot for a BTC 15m prediction market.
 

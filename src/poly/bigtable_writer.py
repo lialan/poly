@@ -23,12 +23,23 @@ from typing import Optional, Union
 from google.cloud import bigtable
 from google.cloud.bigtable import column_family, row_filters
 
-# Table names
-TABLE_SNAPSHOTS_15M = "btc_15m_snapshot"
-TABLE_SNAPSHOTS_1H = "btc_1h_snapshot"
+# Table names - BTC
+TABLE_BTC_15M = "btc_15m_snapshot"
+TABLE_BTC_1H = "btc_1h_snapshot"
+
+# Table names - ETH
+TABLE_ETH_15M = "eth_15m_snapshot"
+TABLE_ETH_1H = "eth_1h_snapshot"
+TABLE_ETH_4H = "eth_4h_snapshot"
+
+# Table names - Trading
 TABLE_OPPORTUNITIES = "opportunities"
 TABLE_TRADES = "simulated_trades"
 TABLE_EQUITY = "equity_curve"
+
+# Backward compatibility
+TABLE_SNAPSHOTS_15M = TABLE_BTC_15M
+TABLE_SNAPSHOTS_1H = TABLE_BTC_1H
 
 # Column family
 CF_DATA = "data"
@@ -108,8 +119,14 @@ class BigtableWriter:
         self._get_client()
 
         tables_to_create = [
-            TABLE_SNAPSHOTS_15M,
-            TABLE_SNAPSHOTS_1H,
+            # BTC
+            TABLE_BTC_15M,
+            TABLE_BTC_1H,
+            # ETH
+            TABLE_ETH_15M,
+            TABLE_ETH_1H,
+            TABLE_ETH_4H,
+            # Trading
             TABLE_OPPORTUNITIES,
             TABLE_TRADES,
             TABLE_EQUITY,

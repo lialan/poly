@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """GCE collector with HTTP health endpoint.
 
-Runs the snapshot collector alongside a minimal HTTP server for health checks.
-Collects both 15-minute and 1-hour BTC prediction market data.
-Uses Binance REST API for BTC price data.
+Collects BTC and ETH prediction market data:
+- BTC: 15m, 1h
+- ETH: 15m, 1h, 4h
 
-Stores minimal snapshot data:
-- timestamp, market_id, btc_price, orderbook (yes_bids, yes_asks, no_bids, no_asks)
+Uses Binance REST API for price data.
+Stores: timestamp, market_id, price, orderbook
 """
 
 import asyncio
@@ -27,11 +27,15 @@ import aiohttp
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from poly.db_writer import get_db_writer
-from poly.binance_price import get_btc_price
-from poly.bigtable_writer import TABLE_SNAPSHOTS_15M, TABLE_SNAPSHOTS_1H
-from poly.btc_markets import (
-    BTCPrediction,
+from poly.binance_price import get_btc_price, get_eth_price
+from poly.bigtable_writer import (
+    TABLE_BTC_15M, TABLE_BTC_1H,
+    TABLE_ETH_15M, TABLE_ETH_1H, TABLE_ETH_4H,
+)
+from poly.markets import (
+    Asset,
     MarketHorizon,
+    CryptoPrediction,
     fetch_current_prediction,
 )
 from poly.market_snapshot import (
@@ -45,23 +49,24 @@ FETCH_TIMEOUT = 5.0
 
 @dataclass
 class MarketType:
-    """Configuration for a market type (15m or 1h)."""
+    """Configuration for a market type."""
 
     label: str
     table_name: str
+    asset: Asset
     horizon: MarketHorizon
 
-    async def fetch_snapshot(self, btc_price: Decimal) -> Optional[MarketSnapshot]:
+    async def fetch_snapshot(self, price: Decimal) -> Optional[MarketSnapshot]:
         """Fetch snapshot for this market type.
 
         Args:
-            btc_price: Current BTC price.
+            price: Current asset price (BTC or ETH).
 
         Returns:
             MarketSnapshot or None if not available.
         """
         try:
-            prediction = await fetch_current_prediction(self.horizon)
+            prediction = await fetch_current_prediction(self.asset, self.horizon)
             if not prediction:
                 return None
 
@@ -74,7 +79,7 @@ class MarketType:
             return MarketSnapshot(
                 timestamp=time_module.time(),
                 market_id=prediction.slug,
-                btc_price=btc_price,
+                btc_price=price,  # Using btc_price field for asset price
                 yes_bids=yes_bids,
                 yes_asks=yes_asks,
                 no_bids=no_bids,
@@ -89,15 +94,7 @@ class MarketType:
         snapshot: Optional[MarketSnapshot],
         writer,
     ) -> tuple[Optional[str], Optional[str]]:
-        """Write snapshot and return (result_str, market_id).
-
-        Args:
-            snapshot: MarketSnapshot to process.
-            writer: Database writer.
-
-        Returns:
-            Tuple of (result_string, market_id) or (None, None) if no snapshot.
-        """
+        """Write snapshot and return (result_str, market_id)."""
         if not snapshot:
             return None, None
 
@@ -113,26 +110,25 @@ class MarketType:
 
 
 # Market type configurations
-MARKET_15M = MarketType(
-    label="15m",
-    table_name=TABLE_SNAPSHOTS_15M,
-    horizon=MarketHorizon.M15,
-)
+BTC_MARKETS = [
+    MarketType("BTC-15m", TABLE_BTC_15M, Asset.BTC, MarketHorizon.M15),
+    MarketType("BTC-1h", TABLE_BTC_1H, Asset.BTC, MarketHorizon.H1),
+]
 
-MARKET_1H = MarketType(
-    label="1h",
-    table_name=TABLE_SNAPSHOTS_1H,
-    horizon=MarketHorizon.H1,
-)
+ETH_MARKETS = [
+    MarketType("ETH-15m", TABLE_ETH_15M, Asset.ETH, MarketHorizon.M15),
+    MarketType("ETH-1h", TABLE_ETH_1H, Asset.ETH, MarketHorizon.H1),
+    MarketType("ETH-4h", TABLE_ETH_4H, Asset.ETH, MarketHorizon.H4),
+]
 
-MARKET_TYPES = [MARKET_15M, MARKET_1H]
+ALL_MARKETS = BTC_MARKETS + ETH_MARKETS
 
 
 # Collector state
 collector_healthy = True
 last_success_time = 0
-latest_btc_price: Optional[Decimal] = None
-latest_markets: dict[str, Optional[str]] = {"15m": None, "1h": None}
+latest_prices: dict[str, Optional[Decimal]] = {"BTC": None, "ETH": None}
+latest_markets: dict[str, Optional[str]] = {}
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -144,12 +140,11 @@ class HealthHandler(BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain")
                 self.end_headers()
-                price_str = f"${latest_btc_price:,.2f}" if latest_btc_price else "N/A"
-                m15 = latest_markets.get("15m")
-                m1h = latest_markets.get("1h")
-                m15_str = m15[-20:] if m15 else "N/A"
-                m1h_str = m1h[-20:] if m1h else "N/A"
-                self.wfile.write(f"OK - BTC: {price_str} | 15m: {m15_str} | 1h: {m1h_str}".encode())
+                btc = latest_prices.get("BTC")
+                eth = latest_prices.get("ETH")
+                btc_str = f"${btc:,.0f}" if btc else "N/A"
+                eth_str = f"${eth:,.0f}" if eth else "N/A"
+                self.wfile.write(f"OK | BTC:{btc_str} | ETH:{eth_str}".encode())
             else:
                 self.send_response(503)
                 self.send_header("Content-Type", "text/plain")
@@ -170,9 +165,36 @@ def run_health_server(port: int):
     server.serve_forever()
 
 
+async def collect_asset_markets(
+    markets: list[MarketType],
+    price: Decimal,
+    writer,
+) -> list[str]:
+    """Collect all markets for an asset concurrently.
+
+    Returns list of result strings.
+    """
+    # Fetch all snapshots concurrently
+    snapshots = await asyncio.gather(
+        *[m.fetch_snapshot(price) for m in markets],
+        return_exceptions=True
+    )
+
+    results = []
+    for market, snapshot in zip(markets, snapshots):
+        if isinstance(snapshot, Exception):
+            continue
+        result, market_id = market.process_snapshot(snapshot, writer)
+        if result:
+            results.append(result)
+            latest_markets[market.label] = market_id
+
+    return results
+
+
 async def run_collector(interval: float):
     """Run the snapshot collector loop."""
-    global collector_healthy, last_success_time, latest_btc_price, latest_markets
+    global collector_healthy, last_success_time, latest_prices
 
     backend = os.getenv("DB_BACKEND", "bigtable")
     project_id = os.getenv("BIGTABLE_PROJECT_ID", "")
@@ -199,8 +221,8 @@ async def run_collector(interval: float):
     error_count = 0
 
     print(f"Collection loop starting (timeout: {FETCH_TIMEOUT}s)")
-    print(f"Markets: {', '.join(m.label for m in MARKET_TYPES)}")
-    print("Storing: timestamp, market_id, btc_price, orderbook")
+    print(f"BTC markets: {', '.join(m.label for m in BTC_MARKETS)}")
+    print(f"ETH markets: {', '.join(m.label for m in ETH_MARKETS)}")
     sys.stdout.flush()
 
     loop_count = 0
@@ -211,34 +233,36 @@ async def run_collector(interval: float):
         print(f"[{timestamp}] Loop {loop_count}: fetching...", end=" ", flush=True)
 
         try:
-            # Fetch BTC price first
-            btc_price = await asyncio.wait_for(get_btc_price(), timeout=FETCH_TIMEOUT)
-
-            if not btc_price:
-                print("SKIP (no BTC price)", flush=True)
-                await asyncio.sleep(interval)
-                continue
-
-            latest_btc_price = btc_price
-
-            # Fetch all snapshots concurrently
-            snapshots = await asyncio.wait_for(
-                asyncio.gather(*[m.fetch_snapshot(btc_price) for m in MARKET_TYPES]),
+            # Fetch BTC and ETH prices concurrently
+            btc_price, eth_price = await asyncio.wait_for(
+                asyncio.gather(get_btc_price(), get_eth_price()),
                 timeout=FETCH_TIMEOUT,
             )
 
-            # Process each snapshot
-            results = []
-            for market_type, snapshot in zip(MARKET_TYPES, snapshots):
-                result, market_id = market_type.process_snapshot(snapshot, writer)
-                if result:
-                    results.append(result)
-                    latest_markets[market_type.label] = market_id
+            if not btc_price and not eth_price:
+                print("SKIP (no prices)", flush=True)
+                await asyncio.sleep(interval)
+                continue
 
-            if results:
+            latest_prices["BTC"] = btc_price
+            latest_prices["ETH"] = eth_price
+
+            # Collect BTC and ETH markets concurrently
+            btc_results, eth_results = await asyncio.wait_for(
+                asyncio.gather(
+                    collect_asset_markets(BTC_MARKETS, btc_price, writer) if btc_price else asyncio.coroutine(lambda: [])(),
+                    collect_asset_markets(ETH_MARKETS, eth_price, writer) if eth_price else asyncio.coroutine(lambda: [])(),
+                ),
+                timeout=FETCH_TIMEOUT,
+            )
+
+            all_results = btc_results + eth_results
+
+            if all_results:
                 elapsed = time_module.time() - start_time
-                btc_str = f"${float(btc_price):,.0f}"
-                print(f"OK ({elapsed:.1f}s) | BTC:{btc_str} | {' | '.join(results)}", flush=True)
+                btc_str = f"${float(btc_price):,.0f}" if btc_price else "N/A"
+                eth_str = f"${float(eth_price):,.0f}" if eth_price else "N/A"
+                print(f"OK ({elapsed:.1f}s) | BTC:{btc_str} ETH:{eth_str} | {' | '.join(all_results)}", flush=True)
 
                 error_count = 0
                 last_success_time = time_module.time()
@@ -268,13 +292,14 @@ def main():
     interval = float(os.getenv("COLLECT_INTERVAL", "5"))
 
     print("=" * 60)
-    print("POLYMARKET DATA COLLECTOR")
+    print("POLYMARKET DATA COLLECTOR (BTC + ETH)")
     print("=" * 60)
     print(f"Health port: {port}")
     print(f"Collect interval: {interval}s")
     print(f"Fetch timeout: {FETCH_TIMEOUT}s")
     print(f"Price source: Binance REST API")
-    print(f"Markets: {', '.join(m.label for m in MARKET_TYPES)}")
+    print(f"BTC: {len(BTC_MARKETS)} markets")
+    print(f"ETH: {len(ETH_MARKETS)} markets")
     print("=" * 60)
 
     health_thread = threading.Thread(target=run_health_server, args=(port,), daemon=True)
