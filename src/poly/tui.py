@@ -23,15 +23,14 @@ from textual.containers import Container, Horizontal, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
+    DataTable,
     Footer,
     Header,
     Label,
-    OptionList,
     Static,
     TabbedContent,
     TabPane,
 )
-from textual.widgets.option_list import Option
 
 from poly.script_discovery import (
     CATEGORIES,
@@ -42,22 +41,25 @@ from poly.script_discovery import (
 )
 
 
-class ScriptOptionList(OptionList):
-    """Option list for scripts."""
+class ScriptTable(DataTable):
+    """DataTable for scripts."""
 
     def __init__(self, scripts: list[ScriptInfo], **kwargs) -> None:
+        super().__init__(**kwargs)
         self.scripts = scripts
-        options = [
-            Option(f"{s.name}  [dim]{s.short_description}[/dim]", id=s.name)
-            for s in scripts
-        ]
-        super().__init__(*options, **kwargs)
+        self.cursor_type = "row"
 
-    def get_script_by_name(self, name: str) -> ScriptInfo | None:
-        """Get script by name."""
-        for s in self.scripts:
-            if s.name == name:
-                return s
+    def on_mount(self) -> None:
+        self.add_columns("Script", "Description")
+        self.add_rows([
+            (s.name, s.short_description)
+            for s in self.scripts
+        ])
+
+    def get_selected_script(self) -> ScriptInfo | None:
+        """Get the currently selected script."""
+        if self.cursor_row is not None and 0 <= self.cursor_row < len(self.scripts):
+            return self.scripts[self.cursor_row]
         return None
 
 
@@ -116,9 +118,8 @@ class PolyTUI(App):
         padding: 0 1;
     }
 
-    ScriptOptionList {
+    ScriptTable {
         height: 100%;
-        border: solid $primary;
     }
 
     #empty-message {
@@ -193,7 +194,7 @@ class PolyTUI(App):
         yield Static("", id="status-bar")
         yield Footer()
 
-    def _create_script_list(self, category: str | None) -> ScriptOptionList | Static:
+    def _create_script_list(self, category: str | None) -> ScriptTable | Static:
         """Create a script list for a category."""
         if category:
             scripts = self.scripts_by_category.get(category, [])
@@ -206,7 +207,7 @@ class PolyTUI(App):
                 id="empty-message",
             )
 
-        return ScriptOptionList(scripts, id=f"list-{category or 'all'}")
+        return ScriptTable(scripts, id=f"list-{category or 'all'}")
 
     def on_mount(self) -> None:
         """Update status on mount."""
@@ -223,13 +224,13 @@ class PolyTUI(App):
         status = self.query_one("#status-bar", Static)
         status.update(f"[dim]{message}[/dim]")
 
-    def _get_current_list(self) -> ScriptOptionList | None:
+    def _get_current_list(self) -> ScriptTable | None:
         """Get the currently visible script list."""
         tabbed = self.query_one(TabbedContent)
         active_tab = tabbed.active
         if active_tab:
             try:
-                return self.query_one(f"#{active_tab} ScriptOptionList", ScriptOptionList)
+                return self.query_one(f"#{active_tab} ScriptTable", ScriptTable)
             except Exception:
                 return None
         return None
@@ -237,10 +238,8 @@ class PolyTUI(App):
     def _get_selected_script(self) -> ScriptInfo | None:
         """Get currently selected script."""
         script_list = self._get_current_list()
-        if script_list and script_list.highlighted is not None:
-            option = script_list.get_option_at_index(script_list.highlighted)
-            if option and option.id:
-                return script_list.get_script_by_name(str(option.id))
+        if script_list:
+            return script_list.get_selected_script()
         return None
 
     async def action_run_script(self) -> None:
