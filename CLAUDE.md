@@ -20,6 +20,10 @@ poly/
 │   ├── __init__.py           # Package exports
 │   ├── markets.py            # Unified BTC/ETH prediction markets
 │   ├── market_snapshot.py    # Orderbook snapshots
+│   ├── market_feed.py        # WebSocket daemon for real-time data
+│   ├── polymarket_api.py     # Async/sync API client (positions, trades)
+│   ├── polymarket_config.py  # Config with Secret Manager support
+│   ├── polymarket_ws.py      # Low-level WebSocket client
 │   ├── binance_price.py      # Binance price data (REST)
 │   ├── bigtable_writer.py    # Google Cloud Bigtable storage
 │   ├── sqlite_writer.py      # SQLite database storage
@@ -29,13 +33,22 @@ poly/
 │   ├── config.py             # Config class with env loading
 │   ├── models.py             # Market, Order, Position models
 │   ├── trading.py            # TradingEngine for strategy execution
+│   ├── trading_bot.py        # Monitoring bot with WebSocket + Bigtable
+│   ├── project_config.py     # Centralized config loader
 │   └── utils.py              # Helpers (retry, formatting)
 ├── scripts/
 │   ├── cloudrun_collector.py # GCE data collector (BTC + ETH)
 │   ├── query_bigtable.py     # Query Bigtable data
 │   ├── collect_snapshots.py  # Local data collector (SQLite)
+│   ├── test_polymarket_api.py    # Test API client
+│   ├── test_polymarket_ws.py     # Test WebSocket
+│   ├── test_market_feed.py       # Test market feed daemon
+│   ├── benchmark_polymarket_apis.py  # API latency benchmarks
+│   ├── run_trading_bot.py    # Trading bot runner
 │   ├── setup.sh              # Dev environment setup
 │   └── gce_setup.sh          # GCE instance setup
+├── config/
+│   └── poly.json             # Centralized project config
 ├── requirements.txt
 ├── pyproject.toml
 ├── DEPLOYMENT.md
@@ -79,6 +92,188 @@ Minimal snapshot structure storing only non-derivable data.
 - `no_bids/asks`: Full NO token orderbook
 
 **Derived properties:** `best_yes_bid/ask`, `yes_mid`, `yes_spread`, etc.
+
+### `polymarket_api.py` - API Client
+Async and sync clients for querying wallet positions, trades, and market status.
+
+**Classes:**
+- `PolymarketAPI` - Async client (uses aiohttp)
+- `PolymarketAPISync` - Sync wrapper
+
+**Dataclasses:**
+- `MarketPosition` - Position in a market (shares, value, PnL)
+- `Trade` - Trade record with status
+- `MarketInfo` - Market metadata and status
+
+**Enums:**
+- `OrderStatus`: LIVE, MATCHED, CANCELLED, DELAYED
+- `TradeStatus`: MATCHED, MINED, CONFIRMED, RETRYING, FAILED
+- `MarketStatus`: ACTIVE, RESOLVED, CLOSED
+
+**Usage:**
+```python
+from poly import PolymarketAPI, PolymarketConfig
+
+config = PolymarketConfig(wallet_address="0x...")
+async with PolymarketAPI(config) as api:
+    positions = await api.get_positions()
+    trades = await api.get_trades(limit=10)
+    shares = await api.get_shares_for_market("btc-updown-15m-...")
+```
+
+### `polymarket_config.py` - Configuration
+Configuration with Google Secret Manager support and env var fallback.
+
+**Classes:**
+- `PolymarketConfig` - Main config dataclass
+- `SecretManager` - GCP Secret Manager wrapper
+
+**Loading priority:**
+1. JSON config file (`config/polymarket.json`)
+2. Google Secret Manager (production)
+3. Environment variables (local testing)
+
+**Env vars:**
+- `POLYMARKET_WALLET_ADDRESS`
+- `POLYMARKET_PRIVATE_KEY` (optional, for trading)
+
+### `market_feed.py` - Real-time Data Feed
+Daemon-like service for streaming market data via WebSocket. **One connection monitors multiple markets.**
+
+**Classes:**
+- `MarketFeed` - Main feed service
+- `PriceUpdate` - Price update event
+- `MarketState` - Current state of a market
+- `FeedStats` - Connection statistics
+
+**Usage:**
+```python
+from poly import MarketFeed
+
+feed = MarketFeed(on_update=my_callback)
+await feed.add_market("btc-15m-...", yes_token, no_token)
+await feed.add_market("eth-15m-...", yes_token, no_token)
+
+# Run as background task
+task = asyncio.create_task(feed.start())
+
+# Access current state
+state = feed.get_market("btc-15m-...")
+print(f"BTC probability: {state.implied_prob:.1%}")
+```
+
+**Performance:**
+- Connection overhead: ~300ms (one-time)
+- Update rate: ~70-100 updates/sec
+- Latency per update: ~1-2ms
+
+### `polymarket_ws.py` - Low-level WebSocket
+Lower-level WebSocket client for custom implementations.
+
+**Endpoint:** `wss://ws-subscriptions-clob.polymarket.com/ws/market`
+
+**Message types:**
+- `book` - Full orderbook snapshot (on subscribe)
+- `price_change` - Best bid/ask updates
+
+### `trading_bot.py` - Monitoring Trading Bot
+Combines WebSocket real-time feed with Bigtable historical data for trading decisions.
+
+**Classes:**
+- `TradingBot` - Main bot with start/run/stop lifecycle
+- `TradingBotConfig` - All configuration in one dataclass
+- `MarketContext` - Data passed to decision function each cycle
+- `DecisionResult` - Structured output from decision function
+- `CycleTiming` - Timing breakdown for debugging
+
+**Protocol:**
+- `DecisionFunction` - Interface for custom trading strategies
+
+**Architecture:**
+1. Startup: Test REST APIs, initialize MarketFeed + BigtableWriter
+2. Main loop (every N seconds):
+   - Pre-fetch Bigtable data (configurable lookback window)
+   - Build MarketContext with live + historical data
+   - Call decision function
+   - Log timing if debug enabled
+3. Shutdown: Clean up on SIGINT/SIGTERM
+
+**Usage:**
+```python
+from poly import TradingBot, TradingBotConfig, MarketContext, DecisionResult
+
+def my_strategy(context: MarketContext) -> DecisionResult:
+    prob = context.implied_prob
+    if prob and prob < 0.35 and context.time_remaining_sec > 120:
+        return DecisionResult(should_trade=True, signal="buy_yes", confidence=0.8)
+    return DecisionResult(should_trade=False)
+
+config = TradingBotConfig(
+    asset=Asset.BTC,
+    horizon=MarketHorizon.M15,
+    decision_interval_sec=3.0,
+    bigtable_lookback_sec=300.0,
+)
+bot = TradingBot(config, decision_fn=my_strategy)
+await bot.run()
+```
+
+**MarketContext fields:**
+- `live_state`: MarketState from WebSocket (yes_bid/ask, implied_prob)
+- `historical_snapshots`: List of dicts from Bigtable
+- `spot_price`: Current asset price
+- `time_remaining_sec`: Seconds until market resolution
+- `cycle_number`: Current decision cycle number
+
+**Performance (typical):**
+- Startup: ~450ms (REST test + WebSocket connect)
+- Bigtable fetch: ~65-70ms per cycle
+- Decision function: <1ms
+- Total cycle: ~70ms
+
+### `project_config.py` - Centralized Config
+Single config file (`config/poly.json`) for all project scripts.
+
+**Config Structure:**
+```json
+{
+    "pythonpath": "src",
+    "bigtable": {
+        "project_id": "poly-collector",
+        "instance_id": "poly-data"
+    },
+    "polymarket": {
+        "wallet_address": null,
+        "private_key": null
+    },
+    "collector": {
+        "interval_sec": 5,
+        "assets": ["btc", "eth"],
+        "horizons": {"btc": ["15m", "1h", "4h", "d1"], "eth": ["15m", "1h", "4h"]}
+    },
+    "trading_bot": {
+        "market": {"asset": "btc", "horizon": "15m"},
+        "timing": {"decision_interval_sec": 3.0, "bigtable_lookback_sec": 300.0},
+        "debug": {"timing": true, "log_level": "INFO"}
+    },
+    "telegram": {"bot_token": null, "chat_id": null}
+}
+```
+
+**Usage:**
+```python
+from poly import load_config, get_bigtable_config
+
+# Load full config
+config = load_config()
+print(config.bigtable.project_id)
+
+# Get specific section
+bigtable = get_bigtable_config()
+
+# Get arbitrary value
+value = get_config_value("trading_bot.timing.decision_interval_sec")
+```
 
 ### `bigtable_writer.py` - Bigtable Storage
 **Tables:**
@@ -142,6 +337,21 @@ PYTHONPATH=src python scripts/query_bigtable.py --count 10
 - `BIGTABLE_INSTANCE_ID` - Bigtable instance ID
 - `COLLECT_INTERVAL` - Seconds between snapshots (default: 5)
 
+**Trading Bot:**
+- `TRADING_BOT_ASSET` - Asset to trade: `btc` or `eth` (default: btc)
+- `DECISION_INTERVAL` - Seconds between decision cycles (default: 3.0)
+- `BIGTABLE_LOOKBACK_SEC` - Historical data window in seconds (default: 300)
+- `DEBUG_TIMING` - Enable timing output: `true` or `false` (default: true)
+
+**Centralized Config:**
+- `config/poly.json` - Single config file for all scripts (loaded automatically)
+
+Config loading priority:
+1. CLI arguments (highest)
+2. `POLY_CONFIG_PATH` environment variable
+3. `config/poly.json` (project root)
+4. Environment variables (lowest)
+
 ## API Reference
 
 ### Polymarket APIs
@@ -149,6 +359,13 @@ PYTHONPATH=src python scripts/query_bigtable.py --count 10
 |-----|----------|------|
 | Gamma API | `https://gamma-api.polymarket.com` | No |
 | CLOB API | `https://clob.polymarket.com` | No (read) |
+| Data API | `https://data-api.polymarket.com` | No |
+| WebSocket | `wss://ws-subscriptions-clob.polymarket.com/ws/market` | No |
+
+**WebSocket subscription:**
+```json
+{"assets_ids": ["<token_id>", ...], "type": "market"}
+```
 
 ### Binance API
 - Base URL: `https://data-api.binance.vision/api/v3`
@@ -165,4 +382,22 @@ pytest tests/ -v
 
 # Run collector locally
 PYTHONPATH=src python scripts/cloudrun_collector.py
+
+# Test Polymarket API
+PYTHONPATH=src python scripts/test_polymarket_api.py --wallet 0x...
+
+# Test WebSocket feed
+PYTHONPATH=src python scripts/test_polymarket_ws.py --duration 10
+
+# Test market feed daemon
+PYTHONPATH=src python scripts/test_market_feed.py --duration 10
+
+# Run trading bot (uses config/poly.json automatically)
+PYTHONPATH=src python scripts/run_trading_bot.py
+
+# Run trading bot with CLI overrides
+PYTHONPATH=src python scripts/run_trading_bot.py --asset eth --interval 5
+
+# Benchmark API latency
+PYTHONPATH=src python scripts/benchmark_polymarket_apis.py
 ```

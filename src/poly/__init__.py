@@ -79,6 +79,31 @@ from .polymarket_ws import (
     stream_market,
     get_orderbook_updates,
 )
+from .market_feed import (
+    MarketFeed,
+    PriceUpdate,
+    MarketState,
+    FeedStats,
+    Side,
+)
+from .trading_bot import (
+    TradingBot,
+    TradingBotConfig,
+    MarketContext,
+    DecisionResult,
+    DecisionFunction,
+    CycleTiming,
+    no_op_decision,
+)
+from .project_config import (
+    load_config,
+    get_bigtable_config,
+    get_polymarket_config,
+    get_collector_config,
+    get_telegram_config,
+    get_config_value,
+    ProjectConfig,
+)
 
 # Lazy import for BigtableWriter (requires google-cloud-bigtable)
 def __getattr__(name):
@@ -152,4 +177,23 @@ __all__ = [
     "ConnectionStats",
     "stream_market",
     "get_orderbook_updates",
+    "MarketFeed",
+    "PriceUpdate",
+    "MarketState",
+    "FeedStats",
+    "Side",
+    "TradingBot",
+    "TradingBotConfig",
+    "MarketContext",
+    "DecisionResult",
+    "DecisionFunction",
+    "CycleTiming",
+    "no_op_decision",
+    "load_config",
+    "get_bigtable_config",
+    "get_polymarket_config",
+    "get_collector_config",
+    "get_telegram_config",
+    "get_config_value",
+    "ProjectConfig",
 ]

@@ -1,0 +1,46 @@
+{
+    "pythonpath": "src",
+
+    "bigtable": {
+        "project_id": "your-gcp-project",
+        "instance_id": "your-bigtable-instance"
+    },
+
+    "polymarket": {
+        "wallet_address": null,
+        "private_key": null
+    },
+
+    "collector": {
+        "interval_sec": 5,
+        "assets": ["btc", "eth"],
+        "horizons": {
+            "btc": ["15m", "1h", "4h", "d1"],
+            "eth": ["15m", "1h", "4h"]
+        }
+    },
+
+    "trading_bot": {
+        "market": {
+            "asset": "btc",
+            "horizon": "15m"
+        },
+        "timing": {
+            "decision_interval_sec": 3.0,
+            "bigtable_lookback_sec": 300.0,
+            "bigtable_fetch_limit": 100
+        },
+        "api": {
+            "test_rest_apis": true
+        },
+        "debug": {
+            "timing": true,
+            "log_level": "INFO"
+        }
+    },
+
+    "telegram": {
+        "bot_token": null,
+        "chat_id": null
+    }
+}
