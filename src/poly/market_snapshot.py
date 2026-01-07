@@ -13,10 +13,10 @@ from .markets import (
     CryptoPrediction,
     Asset,
     MarketHorizon,
-    fetch_btc_15m_prediction,
-    get_current_slot_timestamp_15m as get_current_slot_timestamp,
+    get_current_slot_timestamp,
     slug_to_timestamp,
-    INTERVAL_SECONDS,
+    timestamp_to_slug,
+    _fetch_prediction_by_slug,
 )
 
 CLOB_API_BASE = "https://clob.polymarket.com"
@@ -121,7 +121,14 @@ class MarketSnapshot:
         """Derive resolution time from market_id (slug)."""
         ts = slug_to_timestamp(self.market_id)
         if ts:
-            return datetime.fromtimestamp(ts + INTERVAL_SECONDS, tz=timezone.utc)
+            # Determine horizon from slug pattern
+            if "-15m-" in self.market_id:
+                horizon = MarketHorizon.M15
+            elif "-4h-" in self.market_id:
+                horizon = MarketHorizon.H4
+            else:
+                horizon = MarketHorizon.H1
+            return datetime.fromtimestamp(ts + horizon.value, tz=timezone.utc)
         return None
 
 
@@ -173,13 +180,17 @@ async def fetch_market_snapshot(
     market_id: str,
     btc_price: Decimal,
     prediction: Optional[CryptoPrediction] = None,
+    asset: Asset = Asset.BTC,
+    horizon: MarketHorizon = MarketHorizon.M15,
 ) -> Optional[MarketSnapshot]:
-    """Fetch market snapshot for a BTC 15m prediction market.
+    """Fetch market snapshot for a prediction market.
 
     Args:
         market_id: Market ID (can be slug, event_id, or timestamp).
-        btc_price: Current BTC price.
-        prediction: Optional pre-fetched BTC15mPrediction.
+        btc_price: Current asset price.
+        prediction: Optional pre-fetched CryptoPrediction.
+        asset: Asset type (BTC or ETH).
+        horizon: Market horizon (M15, H1, H4).
 
     Returns:
         MarketSnapshot or None if not found.
@@ -195,7 +206,8 @@ async def fetch_market_snapshot(
             if timestamp is None:
                 return None
 
-        prediction = await fetch_btc_15m_prediction(timestamp)
+        slug = timestamp_to_slug(asset, horizon, timestamp)
+        prediction = await _fetch_prediction_by_slug(slug, asset, horizon)
         if prediction is None:
             return None
 
@@ -217,14 +229,20 @@ async def fetch_market_snapshot(
     )
 
 
-async def fetch_current_snapshot(btc_price: Decimal) -> Optional[MarketSnapshot]:
-    """Fetch snapshot for the current 15-minute slot.
+async def fetch_current_snapshot(
+    price: Decimal,
+    asset: Asset = Asset.BTC,
+    horizon: MarketHorizon = MarketHorizon.M15,
+) -> Optional[MarketSnapshot]:
+    """Fetch snapshot for the current market slot.
 
     Args:
-        btc_price: Current BTC price.
+        price: Current asset price.
+        asset: Asset type (BTC or ETH).
+        horizon: Market horizon (M15, H1, H4).
     """
-    timestamp = get_current_slot_timestamp()
-    return await fetch_market_snapshot(str(timestamp), btc_price)
+    timestamp = get_current_slot_timestamp(horizon)
+    return await fetch_market_snapshot(str(timestamp), price, asset=asset, horizon=horizon)
 
 
 def print_snapshot(snapshot: MarketSnapshot) -> None:

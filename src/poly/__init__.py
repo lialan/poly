@@ -18,10 +18,10 @@ from .markets import (
     Asset,
     MarketHorizon,
     CryptoPrediction,
-    BTCPrediction,  # backward compatibility alias
-    BTC15mPrediction,  # backward compatibility alias
     fetch_current_prediction,
-    fetch_btc_15m_prediction,
+    get_current_slot_timestamp,
+    timestamp_to_slug,
+    slug_to_timestamp,
 )
 from .binance_price import (
     get_btc_price,
@@ -86,10 +86,10 @@ __all__ = [
     "Asset",
     "MarketHorizon",
     "CryptoPrediction",
-    "BTCPrediction",
-    "BTC15mPrediction",
     "fetch_current_prediction",
-    "fetch_btc_15m_prediction",
+    "get_current_slot_timestamp",
+    "timestamp_to_slug",
+    "slug_to_timestamp",
     "get_btc_price",
     "get_eth_price",
     "get_prices",

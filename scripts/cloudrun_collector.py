@@ -89,6 +89,15 @@ class MarketType:
             print(f"Error fetching {self.label} snapshot: {e}")
             return None
 
+    @property
+    def horizon_str(self) -> str:
+        """Short horizon string (15m, 1h, 4h)."""
+        return {
+            MarketHorizon.M15: "15m",
+            MarketHorizon.H1: "1h",
+            MarketHorizon.H4: "4h",
+        }[self.horizon]
+
     def process_snapshot(
         self,
         snapshot: Optional[MarketSnapshot],
@@ -102,9 +111,9 @@ class MarketType:
 
         if snapshot.yes_mid:
             mid = float(snapshot.yes_mid) * 100
-            result = f"{self.label}:{mid:.0f}%"
+            result = f"{self.horizon_str}:{mid:.0f}%"
         else:
-            result = f"{self.label}:OK"
+            result = f"{self.horizon_str}:OK"
 
         return result, snapshot.market_id
 
@@ -233,42 +242,70 @@ async def run_collector(interval: float):
         print(f"[{timestamp}] Loop {loop_count}: fetching...", end=" ", flush=True)
 
         try:
-            # Fetch BTC and ETH prices concurrently
-            btc_price, eth_price = await asyncio.wait_for(
-                asyncio.gather(get_btc_price(), get_eth_price()),
-                timeout=FETCH_TIMEOUT,
+            # Fetch BTC and ETH prices concurrently (with individual error handling)
+            btc_price_result, eth_price_result = await asyncio.gather(
+                get_btc_price(),
+                get_eth_price(),
+                return_exceptions=True,
             )
 
-            if not btc_price and not eth_price:
-                print("SKIP (no prices)", flush=True)
-                await asyncio.sleep(interval)
-                continue
+            btc_price = btc_price_result if not isinstance(btc_price_result, Exception) else None
+            eth_price = eth_price_result if not isinstance(eth_price_result, Exception) else None
 
-            latest_prices["BTC"] = btc_price
-            latest_prices["ETH"] = eth_price
+            if btc_price:
+                latest_prices["BTC"] = btc_price
+            if eth_price:
+                latest_prices["ETH"] = eth_price
 
-            # Collect BTC and ETH markets concurrently
-            btc_results, eth_results = await asyncio.wait_for(
-                asyncio.gather(
-                    collect_asset_markets(BTC_MARKETS, btc_price, writer) if btc_price else asyncio.coroutine(lambda: [])(),
-                    collect_asset_markets(ETH_MARKETS, eth_price, writer) if eth_price else asyncio.coroutine(lambda: [])(),
-                ),
-                timeout=FETCH_TIMEOUT,
-            )
+            # Collect BTC and ETH markets concurrently (independent of each other)
+            btc_task = collect_asset_markets(BTC_MARKETS, btc_price, writer) if btc_price else None
+            eth_task = collect_asset_markets(ETH_MARKETS, eth_price, writer) if eth_price else None
 
-            all_results = btc_results + eth_results
+            tasks = [t for t in [btc_task, eth_task] if t is not None]
+            if tasks:
+                results = await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=FETCH_TIMEOUT,
+                )
+                # Map results back
+                result_idx = 0
+                btc_results = []
+                eth_results = []
+                if btc_task:
+                    r = results[result_idx]
+                    btc_results = r if not isinstance(r, Exception) else []
+                    result_idx += 1
+                if eth_task:
+                    r = results[result_idx]
+                    eth_results = r if not isinstance(r, Exception) else []
+            else:
+                btc_results = []
+                eth_results = []
 
-            if all_results:
-                elapsed = time_module.time() - start_time
-                btc_str = f"${float(btc_price):,.0f}" if btc_price else "N/A"
-                eth_str = f"${float(eth_price):,.0f}" if eth_price else "N/A"
-                print(f"OK ({elapsed:.1f}s) | BTC:{btc_str} ETH:{eth_str} | {' | '.join(all_results)}", flush=True)
+            # Build output
+            elapsed = time_module.time() - start_time
+            parts = [f"({elapsed:.1f}s)"]
 
+            if btc_price:
+                btc_str = f"${float(btc_price):,.0f}"
+                btc_markets = ' '.join(btc_results) if btc_results else "none"
+                parts.append(f"BTC:{btc_str} [{btc_markets}]")
+            else:
+                parts.append("BTC:ERR")
+
+            if eth_price:
+                eth_str = f"${float(eth_price):,.0f}"
+                eth_markets = ' '.join(eth_results) if eth_results else "none"
+                parts.append(f"ETH:{eth_str} [{eth_markets}]")
+            else:
+                parts.append("ETH:ERR")
+
+            print(" | ".join(parts), flush=True)
+
+            if btc_results or eth_results:
                 error_count = 0
                 last_success_time = time_module.time()
                 collector_healthy = True
-            else:
-                print("SKIP (no data)", flush=True)
 
         except asyncio.TimeoutError:
             print(f"SKIP (timeout {FETCH_TIMEOUT}s)", flush=True)
