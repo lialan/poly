@@ -3,18 +3,27 @@
 
 Usage:
     python scripts/query_bigtable.py [--count N] [--table TABLE]
+    python scripts/query_bigtable.py --status
 
 Examples:
     python scripts/query_bigtable.py
     python scripts/query_bigtable.py --count 10
-    python scripts/query_bigtable.py --table market_snapshots --count 5
+    python scripts/query_bigtable.py --table btc_15m_snapshot --count 5
+    python scripts/query_bigtable.py --status
 """
 
 import argparse
 import json
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
+
+# Add src to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from google.cloud import bigtable
+
+from poly.bigtable_status import check_collection_status, print_status
 
 
 def query_snapshots(
@@ -80,14 +89,18 @@ def main():
     parser = argparse.ArgumentParser(description="Query Bigtable data")
     parser.add_argument("--project", default="poly-collector", help="GCP project ID")
     parser.add_argument("--instance", default="poly-data", help="Bigtable instance ID")
-    parser.add_argument("--table", default="market_snapshots", help="Table name")
+    parser.add_argument("--table", default="btc_15m_snapshot", help="Table name")
     parser.add_argument("--count", type=int, default=5, help="Number of rows to fetch")
     parser.add_argument("--depth", action="store_true", help="Show orderbook depth info")
     parser.add_argument("--list-tables", action="store_true", help="List all tables")
+    parser.add_argument("--status", action="store_true", help="Show collection status for all tables")
 
     args = parser.parse_args()
 
-    if args.list_tables:
+    if args.status:
+        status = check_collection_status(args.project, args.instance)
+        print_status(status)
+    elif args.list_tables:
         list_tables(args.project, args.instance)
     else:
         query_snapshots(

@@ -104,6 +104,12 @@ from .project_config import (
     get_config_value,
     ProjectConfig,
 )
+from .bigtable_status import (
+    check_collection_status,
+    CollectionStatus,
+    TableStatus,
+    SNAPSHOT_TABLES,
+)
 
 # Lazy import for BigtableWriter (requires google-cloud-bigtable)
 def __getattr__(name):
@@ -196,4 +202,8 @@ __all__ = [
     "get_telegram_config",
     "get_config_value",
     "ProjectConfig",
+    "check_collection_status",
+    "CollectionStatus",
+    "TableStatus",
+    "SNAPSHOT_TABLES",
 ]

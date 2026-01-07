@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 from simple_term_menu import TerminalMenu
 
@@ -21,6 +22,27 @@ from poly.script_discovery import (
     discover_scripts,
     get_scripts_by_category,
 )
+
+
+def get_collection_status() -> Optional[str]:
+    """Get Bigtable collection status summary.
+
+    Returns None if Bigtable is not accessible.
+    """
+    try:
+        from poly.bigtable_status import check_collection_status
+        status = check_collection_status()
+
+        # Build compact status line
+        parts = []
+        for t in status.tables:
+            # Extract asset and horizon (e.g., "btc_15m" from "btc_15m_snapshot")
+            name = t.table_name.replace("_snapshot", "")
+            parts.append(f"{name}:{t.status_emoji}")
+
+        return " | ".join(parts)
+    except Exception as e:
+        return f"Error: {str(e)[:30]}"
 
 
 def clear_screen():
@@ -122,7 +144,14 @@ def main():
         clear_screen()
         print("\n  POLYMARKET TRADING PLATFORM")
         print("  Script Launcher")
-        print(f"  {'─' * 40}")
+        print(f"  {'─' * 50}")
+
+        # Show collection status
+        status = get_collection_status()
+        if status:
+            print(f"  Collection: {status}")
+            print(f"  {'─' * 50}")
+
         print(f"  {len(all_scripts)} scripts available\n")
 
         # Build main menu options
@@ -136,6 +165,7 @@ def main():
                 main_options.append(f"{label} ({count})")
 
         main_options.append(f"All Scripts ({len(all_scripts)})")
+        main_options.append("Refresh Status")
         main_options.append("Quit")
 
         menu = TerminalMenu(
@@ -152,6 +182,10 @@ def main():
             clear_screen()
             print("Goodbye!")
             break
+
+        # Handle "Refresh Status" - just continue to redraw
+        if main_options[choice] == "Refresh Status":
+            continue
 
         # Handle "All Scripts"
         if "All Scripts" in main_options[choice]:
