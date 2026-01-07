@@ -212,8 +212,9 @@ class PolyTUI(App):
 
     def __init__(self) -> None:
         super().__init__()
-        self.scripts_by_category: dict[str, list[ScriptInfo]] = {}
-        self.all_scripts: list[ScriptInfo] = []
+        # Load scripts immediately so they're available for compose()
+        self.all_scripts = discover_scripts()
+        self.scripts_by_category = get_scripts_by_category()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -246,14 +247,14 @@ class PolyTUI(App):
         return ScriptList(scripts, id=f"list-{category or 'all'}")
 
     def on_mount(self) -> None:
-        """Load scripts on mount."""
-        self._load_scripts()
+        """Update status on mount."""
+        self._update_status(f"Loaded {len(self.all_scripts)} scripts")
 
-    def _load_scripts(self) -> None:
-        """Load and categorize scripts."""
+    def _refresh_scripts(self) -> None:
+        """Reload scripts (for refresh action)."""
         self.all_scripts = discover_scripts()
         self.scripts_by_category = get_scripts_by_category()
-        self._update_status(f"Loaded {len(self.all_scripts)} scripts")
+        self._update_status(f"Refreshed: {len(self.all_scripts)} scripts")
 
     def _update_status(self, message: str) -> None:
         """Update status bar message."""
@@ -329,9 +330,8 @@ class PolyTUI(App):
         self._update_status(f"Returned from {script.name}")
 
     def action_refresh(self) -> None:
-        """Refresh script list."""
-        self._load_scripts()
-        self._update_status("Scripts refreshed")
+        """Refresh script list (note: requires app restart to see new scripts)."""
+        self._refresh_scripts()
 
     def action_tab_trading(self) -> None:
         """Switch to trading tab."""
