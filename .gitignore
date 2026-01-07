@@ -74,4 +74,5 @@ poly_data.db
 
 # Config files with secrets
 config/
+!config/*.example.json
 *.secrets.json

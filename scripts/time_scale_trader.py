@@ -78,6 +78,9 @@ class TradingConfig:
     # Time constraints
     min_time_remaining_sec: float = 60.0
 
+    # Multi-trade settings
+    trade_interval_sec: float = 60.0  # Minimum seconds between new trades
+
     # Transaction costs
     slippage_pct: float = 0.01
     tx_fee_pct: float = 0.01
@@ -268,6 +271,7 @@ def calculate_available_liquidity(
 @dataclass
 class Position:
     """Represents an open position."""
+    id: int  # Unique identifier for tracking
     entry_time: float
     market_id: str
     side: str
@@ -296,19 +300,25 @@ class Trade:
 
 @dataclass
 class TradingState:
-    """Current trading state."""
+    """Current trading state with support for multiple parallel positions."""
     asset: Asset
     capital: float
-    position: Optional[Position] = None
+    positions: list[Position] = field(default_factory=list)  # Multiple parallel positions
     trades: list[Trade] = field(default_factory=list)
     total_pnl: float = 0.0
     winning_trades: int = 0
     losing_trades: int = 0
+    last_entry_time: float = 0.0  # Track last entry for cooldown
+    next_position_id: int = 1  # Auto-increment position ID
 
     @property
     def win_rate(self) -> float:
         total = self.winning_trades + self.losing_trades
         return self.winning_trades / total if total > 0 else 0.0
+
+    @property
+    def open_position_count(self) -> int:
+        return len(self.positions)
 
 
 # ============================================================================
@@ -355,10 +365,13 @@ def evaluate_opportunity(
     state: TradingState,
 ) -> Optional[dict]:
     """Evaluate if current data presents a trading opportunity."""
-    if state.position is not None:
+    # Check if we have enough capital
+    if state.capital < config.bet_size:
         return None
 
-    if state.capital < config.bet_size:
+    # Check cooldown since last trade
+    time_since_last_entry = data.timestamp - state.last_entry_time
+    if time_since_last_entry < config.trade_interval_sec:
         return None
 
     if not data.m15_prices or not data.m15_orderbook:
@@ -439,6 +452,7 @@ def execute_entry(
     size_shares = effective_bet / entry_price_with_slippage
 
     position = Position(
+        id=state.next_position_id,
         entry_time=opportunity["ts"],
         market_id=opportunity["market_id"],
         side=opportunity["side"],
@@ -448,7 +462,9 @@ def execute_entry(
     )
 
     state.capital -= config.bet_size
-    state.position = position
+    state.positions.append(position)
+    state.last_entry_time = opportunity["ts"]
+    state.next_position_id += 1
 
     return position
 
@@ -476,7 +492,11 @@ def check_exit(
     pnl_pct = (current_value - position.cost_usd) / position.cost_usd
 
     if pnl_pct >= config.profit_target_pct:
-        return ("profit_target", exit_price_with_slippage, current_value)
+        # If probability > 80%, hold till end instead of taking profit
+        if bid > 0.80:
+            pass  # Don't exit, let it ride to market close
+        else:
+            return ("profit_target", exit_price_with_slippage, current_value)
 
     if data.m15_market_id != position.market_id:
         return ("market_close", exit_price_with_slippage, current_value)
@@ -514,7 +534,9 @@ def execute_exit(
     state.capital += current_value
     state.total_pnl += pnl
     state.trades.append(trade)
-    state.position = None
+
+    # Remove position from list
+    state.positions = [p for p in state.positions if p.id != position.id]
 
     if pnl > 0:
         state.winning_trades += 1
@@ -533,41 +555,43 @@ def run_backtest(
     config: TradingConfig,
     verbose: bool = True,
 ) -> TradingState:
-    """Run backtest on historical market data."""
+    """Run backtest on historical market data with support for parallel trades."""
     state = TradingState(asset=config.asset, capital=config.initial_capital)
 
     if verbose:
         print("=" * 70)
-        print(f"BACKTEST: {config.asset.value.upper()}")
+        print(f"BACKTEST: {config.asset.value.upper()} (Multi-Trade Mode)")
         print("=" * 70)
         print(f"Initial Capital: ${config.initial_capital:.2f}")
         print(f"Bet Size: ${config.bet_size:.2f}")
         print(f"Profit Target: {config.profit_target_pct * 100:.1f}%")
         print(f"Min Mispricing: {config.min_mispricing * 100:.1f}%")
+        print(f"Trade Interval: {config.trade_interval_sec:.0f}s")
         print(f"Data Points: {len(market_data)}")
         print("=" * 70)
 
     for data in market_data:
-        # Check for market change
-        if state.position and data.m15_market_id != state.position.market_id:
+        # Check for market changes - exit positions whose market has changed
+        positions_to_close = [p for p in state.positions if data.m15_market_id != p.market_id]
+        for position in positions_to_close:
             if verbose:
-                print(f"\n[MARKET CHANGE] {state.position.market_id} -> {data.m15_market_id}")
+                print(f"\n[MARKET CHANGE] Pos #{position.id}: {position.market_id} -> {data.m15_market_id}")
 
             if data.m15_prices:
-                if state.position.side == "yes":
-                    exit_price = data.m15_prices.get("yes_bid", state.position.entry_price)
+                if position.side == "yes":
+                    exit_price = data.m15_prices.get("yes_bid", position.entry_price)
                 else:
-                    exit_price = data.m15_prices.get("no_bid", state.position.entry_price)
+                    exit_price = data.m15_prices.get("no_bid", position.entry_price)
 
                 exit_price_with_slippage = exit_price * (1 - config.slippage_pct)
-                gross_value = state.position.size_shares * exit_price_with_slippage
+                gross_value = position.size_shares * exit_price_with_slippage
                 current_value = gross_value * (1 - config.tx_fee_pct)
             else:
-                exit_price_with_slippage = state.position.entry_price
-                current_value = state.position.cost_usd
+                exit_price_with_slippage = position.entry_price
+                current_value = position.cost_usd
 
             trade = execute_exit(
-                state.position,
+                position,
                 "market_close",
                 exit_price_with_slippage,
                 current_value,
@@ -578,13 +602,14 @@ def run_backtest(
             if verbose:
                 print(f"  Exit: ${trade.proceeds_usd:.2f} | PnL: ${trade.pnl:.2f} ({trade.pnl_pct*100:.1f}%)")
 
-        # Check for exit
-        if state.position:
-            exit_info = check_exit(state.position, data, config)
+        # Check for exits on all remaining positions
+        positions_snapshot = list(state.positions)  # Copy to avoid modification during iteration
+        for position in positions_snapshot:
+            exit_info = check_exit(position, data, config)
             if exit_info:
                 exit_reason, exit_price, current_value = exit_info
                 trade = execute_exit(
-                    state.position,
+                    position,
                     exit_reason,
                     exit_price,
                     current_value,
@@ -594,51 +619,57 @@ def run_backtest(
 
                 if verbose:
                     dt = datetime.fromtimestamp(data.timestamp, tz=timezone.utc)
-                    print(f"\n[EXIT {exit_reason.upper()}] {dt.strftime('%H:%M:%S')}")
+                    print(f"\n[EXIT {exit_reason.upper()}] Pos #{position.id} @ {dt.strftime('%H:%M:%S')}")
                     print(f"  {trade.side.upper()} | Entry: ${trade.entry_price:.4f} -> Exit: ${trade.exit_price:.4f}")
                     print(f"  PnL: ${trade.pnl:.2f} ({trade.pnl_pct*100:.1f}%)")
 
-        # Look for entry
-        if state.position is None:
-            opp = evaluate_opportunity(data, config, state)
-            if opp:
-                position = execute_entry(opp, config, state)
+        # Look for new entry (cooldown is checked in evaluate_opportunity)
+        opp = evaluate_opportunity(data, config, state)
+        if opp:
+            position = execute_entry(opp, config, state)
 
-                if verbose and position:
-                    dt = datetime.fromtimestamp(data.timestamp, tz=timezone.utc)
-                    h1_str = f" | 1h: {opp['yes_mid_1h']*100:.0f}%" if opp.get('yes_mid_1h') else ""
-                    print(f"\n[ENTRY] {dt.strftime('%H:%M:%S')} | {data.m15_market_id}")
-                    print(f"  Signal: {opp['signal']} | Mispricing: {opp.get('mispricing', 0)*100:.1f}%{h1_str}")
-                    print(f"  {position.side.upper()} @ ${position.entry_price:.4f}")
-                    print(f"  Shares: {position.size_shares:.2f} | Cost: ${position.cost_usd:.2f}")
+            if verbose and position:
+                dt = datetime.fromtimestamp(data.timestamp, tz=timezone.utc)
+                h1_str = f" | 1h: {opp['yes_mid_1h']*100:.0f}%" if opp.get('yes_mid_1h') else ""
+                pos_count = f" | Open: {state.open_position_count}"
+                print(f"\n[ENTRY] Pos #{position.id} @ {dt.strftime('%H:%M:%S')} | {data.m15_market_id}")
+                print(f"  Signal: {opp['signal']} | Mispricing: {opp.get('mispricing', 0)*100:.1f}%{h1_str}{pos_count}")
+                print(f"  {position.side.upper()} @ ${position.entry_price:.4f}")
+                print(f"  Shares: {position.size_shares:.2f} | Cost: ${position.cost_usd:.2f}")
 
-    # Force close remaining position
-    if state.position and market_data:
+    # Force close all remaining positions
+    if state.positions and market_data:
         last_data = market_data[-1]
-        if last_data.m15_prices:
-            if state.position.side == "yes":
-                exit_price = last_data.m15_prices.get("yes_bid", state.position.entry_price)
+        positions_to_close = list(state.positions)  # Copy list
+
+        if verbose and positions_to_close:
+            print(f"\n[BACKTEST END] Force closing {len(positions_to_close)} position(s)")
+
+        for position in positions_to_close:
+            if last_data.m15_prices:
+                if position.side == "yes":
+                    exit_price = last_data.m15_prices.get("yes_bid", position.entry_price)
+                else:
+                    exit_price = last_data.m15_prices.get("no_bid", position.entry_price)
+
+                exit_price_with_slippage = exit_price * (1 - config.slippage_pct)
+                gross_value = position.size_shares * exit_price_with_slippage
+                current_value = gross_value * (1 - config.tx_fee_pct)
             else:
-                exit_price = last_data.m15_prices.get("no_bid", state.position.entry_price)
+                exit_price_with_slippage = position.entry_price
+                current_value = position.cost_usd
 
-            exit_price_with_slippage = exit_price * (1 - config.slippage_pct)
-            gross_value = state.position.size_shares * exit_price_with_slippage
-            current_value = gross_value * (1 - config.tx_fee_pct)
-        else:
-            exit_price_with_slippage = state.position.entry_price
-            current_value = state.position.cost_usd
+            trade = execute_exit(
+                position,
+                "backtest_end",
+                exit_price_with_slippage,
+                current_value,
+                last_data.timestamp,
+                state,
+            )
 
-        trade = execute_exit(
-            state.position,
-            "backtest_end",
-            exit_price_with_slippage,
-            current_value,
-            last_data.timestamp,
-            state,
-        )
-
-        if verbose:
-            print(f"\n[BACKTEST END] Force close | PnL: ${trade.pnl:.2f}")
+            if verbose:
+                print(f"  Pos #{position.id}: PnL ${trade.pnl:.2f} ({trade.pnl_pct*100:.1f}%)")
 
     if verbose:
         print("\n" + "=" * 70)
@@ -760,7 +791,7 @@ def load_market_data(
 # ============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Time-Scale Consistency Trader")
+    parser = argparse.ArgumentParser(description="Time-Scale Consistency Trader (Multi-Trade)")
     parser.add_argument("--asset", type=str, default="btc", choices=["btc", "eth"],
                         help="Asset to trade (btc or eth)")
     parser.add_argument("--hours-ago", type=float, default=6.0,
@@ -773,6 +804,8 @@ def main():
                         help="Profit target (0.25 = 25%%)")
     parser.add_argument("--min-mispricing", type=float, default=0.05,
                         help="Minimum mispricing to trade")
+    parser.add_argument("--trade-interval", type=float, default=60.0,
+                        help="Minimum seconds between new trades (default: 60)")
     parser.add_argument("--include-1h", action="store_true", default=True,
                         help="Load 1h data alongside 15m")
     parser.add_argument("--quiet", action="store_true",
@@ -788,6 +821,7 @@ def main():
         bet_size=args.bet_size,
         profit_target_pct=args.profit_target,
         min_mispricing=args.min_mispricing,
+        trade_interval_sec=args.trade_interval,
     )
 
     now = time.time()

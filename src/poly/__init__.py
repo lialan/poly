@@ -59,6 +59,26 @@ from .binance_ws import (
     collect_klines,
     parse_kline_message,
 )
+from .polymarket_config import PolymarketConfig, SecretManager
+from .polymarket_api import (
+    PolymarketAPI,
+    PolymarketAPISync,
+    MarketPosition,
+    Trade,
+    MarketInfo,
+    OrderStatus,
+    TradeStatus,
+    MarketStatus,
+)
+from .polymarket_ws import (
+    PolymarketWS,
+    MultiMarketWS,
+    MarketUpdate,
+    UpdateType,
+    ConnectionStats,
+    stream_market,
+    get_orderbook_updates,
+)
 
 # Lazy import for BigtableWriter (requires google-cloud-bigtable)
 def __getattr__(name):
@@ -115,4 +135,21 @@ __all__ = [
     "RealtimeKline",
     "collect_klines",
     "parse_kline_message",
+    "PolymarketConfig",
+    "SecretManager",
+    "PolymarketAPI",
+    "PolymarketAPISync",
+    "MarketPosition",
+    "Trade",
+    "MarketInfo",
+    "OrderStatus",
+    "TradeStatus",
+    "MarketStatus",
+    "PolymarketWS",
+    "MultiMarketWS",
+    "MarketUpdate",
+    "UpdateType",
+    "ConnectionStats",
+    "stream_market",
+    "get_orderbook_updates",
 ]
