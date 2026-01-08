@@ -202,25 +202,52 @@ def get_current_day_et() -> datetime:
         return (et_now + timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
 
 
-def get_current_slug(asset: Asset, horizon: MarketHorizon) -> str:
-    """Get the slug for the current market slot.
+def get_slot_timestamp(horizon: MarketHorizon, slots_ahead: int = 0) -> int:
+    """Get the Unix timestamp for a market slot.
+
+    Args:
+        horizon: Market time horizon (M15, H4).
+        slots_ahead: Number of slots ahead (0 = current, 1 = next, negative = past)
+
+    Returns:
+        Unix timestamp for the slot.
+    """
+    current = get_current_slot_timestamp(horizon)
+    return current + (slots_ahead * horizon.value)
+
+
+def get_slug(asset: Asset, horizon: MarketHorizon, slots_ahead: int = 0) -> str:
+    """Get the slug for a market slot.
+
+    This is the main function for generating market slugs. Use slots_ahead
+    to get current (0), future (positive), or past (negative) markets.
 
     Args:
         asset: Crypto asset (BTC or ETH).
         horizon: Market time horizon.
+        slots_ahead: Number of slots ahead (0 = current, 1 = next, -1 = previous)
 
     Returns:
-        Slug string for the current market.
+        Slug string for the market.
+
+    Examples:
+        >>> get_slug(Asset.BTC, MarketHorizon.M15)  # Current
+        'btc-updown-15m-1767882600'
+        >>> get_slug(Asset.BTC, MarketHorizon.M15, 1)  # Next 15m
+        'btc-updown-15m-1767883500'
+        >>> get_slug(Asset.BTC, MarketHorizon.H1, 0)  # Current hourly
+        'bitcoin-up-or-down-january-8-10pm-et'
     """
     if horizon == MarketHorizon.H1:
         et_now = get_current_hour_et()
-        resolution_hour = et_now + timedelta(hours=1)
+        resolution_hour = et_now + timedelta(hours=1 + slots_ahead)
         return datetime_to_slug_1h(asset, resolution_hour)
     elif horizon == MarketHorizon.D1:
         resolution_day = get_current_day_et()
+        resolution_day = resolution_day + timedelta(days=slots_ahead)
         return datetime_to_slug_d1(asset, resolution_day)
     else:  # M15 or H4
-        timestamp = get_current_slot_timestamp(horizon)
+        timestamp = get_slot_timestamp(horizon, slots_ahead)
         return timestamp_to_slug(asset, horizon, timestamp)
 
 
@@ -353,7 +380,36 @@ async def fetch_current_prediction(
     Returns:
         CryptoPrediction or None if not found.
     """
-    slug = get_current_slug(asset, horizon)
+    slug = get_slug(asset, horizon)  # slots_ahead=0 by default
     return await _fetch_prediction_by_slug(slug, asset, horizon)
+
+
+# ============================================================================
+# Batch Slug Generation
+# ============================================================================
+
+def get_market_slugs(
+    asset: Asset,
+    horizon: MarketHorizon,
+    count: int = 5,
+    include_current: bool = True,
+) -> list[str]:
+    """Get a list of market slugs (current and future).
+
+    Args:
+        asset: Crypto asset (BTC or ETH).
+        horizon: Market time horizon.
+        count: Total number of slugs to return.
+        include_current: If True, start from current slot; if False, start from next.
+
+    Returns:
+        List of slug strings.
+
+    Examples:
+        >>> get_market_slugs(Asset.BTC, MarketHorizon.M15, count=3)
+        ['btc-updown-15m-1767882600', 'btc-updown-15m-1767883500', 'btc-updown-15m-1767884400']
+    """
+    start = 0 if include_current else 1
+    return [get_slug(asset, horizon, i) for i in range(start, start + count)]
 
 

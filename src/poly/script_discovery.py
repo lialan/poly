@@ -35,7 +35,7 @@ def categorize(filename: str) -> str:
     """Categorize script by naming convention."""
     name = filename.lower()
 
-    if any(p in name for p in ["_bot", "_trader", "trading"]):
+    if any(p in name for p in ["_bot", "_trader", "trading", "trade_"]):
         return "trading"
     if name.startswith("test_") or "benchmark" in name:
         return "test"
