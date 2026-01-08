@@ -2,7 +2,8 @@
 """
 Test Market Token ID Queries
 
-Fetches and displays current BTC market slugs and token IDs for 15m, 1h, and 4h horizons.
+Fetches and displays BTC market slugs and token IDs for 15m, 1h, and 4h horizons.
+Shows current and next 3 future markets for each horizon.
 
 Usage:
     python scripts/test_market_tokens.py
@@ -18,14 +19,16 @@ from poly import Asset, MarketHorizon, get_slug, PolymarketAPI
 from poly.polymarket_config import PolymarketConfig
 
 
+SLOT_LABELS = ["current", "next", "next+1", "next+2"]
+
+
 async def main():
     """Fetch and display BTC market tokens for all horizons."""
-    print("=" * 70)
+    print("=" * 80)
     print("BTC MARKET TOKENS")
     print(f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    print("=" * 70)
+    print("=" * 80)
 
-    # Use dummy wallet for read-only queries
     config = PolymarketConfig(
         wallet_address="0x0000000000000000000000000000000000000000"
     )
@@ -42,25 +45,23 @@ async def main():
         for name, horizon in horizons:
             print(f"\n[BTC {name}]")
 
-            # Get current slug
-            slug = get_slug(Asset.BTC, horizon)
-            print(f"  Slug: {slug}")
+            for i, label in enumerate(SLOT_LABELS):
+                slug = get_slug(Asset.BTC, horizon, slots_ahead=i)
+                tokens = await api.get_market_tokens(slug)
 
-            # Fetch tokens from API
-            tokens = await api.get_market_tokens(slug)
-
-            if tokens:
-                up_token = tokens.get("up", "")
-                down_token = tokens.get("down", "")
-                print(f"  UP:   {up_token}")
-                print(f"  DOWN: {down_token}")
-            else:
-                print("  [No tokens found]")
+                if tokens:
+                    up = tokens.get("up", "")
+                    down = tokens.get("down", "")
+                    print(f"  {label:8} {slug}")
+                    print(f"           UP:   {up}")
+                    print(f"           DOWN: {down}")
+                else:
+                    print(f"  {label:8} {slug} [No tokens]")
 
     finally:
         await api.close()
 
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 80)
 
 
 if __name__ == "__main__":
