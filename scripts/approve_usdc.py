@@ -267,6 +267,7 @@ Examples:
 
         # Send transaction
         tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        print(f"    [OK] Transaction submitted!")
         print(f"    TX Hash: {tx_hash.hex()}")
         print(f"    Polygonscan: https://polygonscan.com/tx/{tx_hash.hex()}")
 
@@ -274,31 +275,11 @@ Examples:
         print(f"    [ERROR] Failed to send transaction: {e}")
         return 1
 
-    # Wait for confirmation
-    print("\n[7] Waiting for confirmation...")
-    try:
-        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-
-        if receipt['status'] == 1:
-            print(f"    [OK] Transaction confirmed!")
-            print(f"    Block: {receipt['blockNumber']}")
-            print(f"    Gas Used: {receipt['gasUsed']}")
-
-            # Verify new allowance
-            new_allowance = usdc.functions.allowance(wallet, exchange).call()
-            print(f"    New Allowance: {format_usdc(new_allowance)}")
-        else:
-            print("    [ERROR] Transaction failed!")
-            return 1
-
-    except Exception as e:
-        print(f"    [ERROR] Failed to get receipt: {e}")
-        print("    Transaction may still be pending - check Polygonscan")
-        return 1
-
     print("\n" + "=" * 60)
-    print("APPROVAL COMPLETE")
+    print("TRANSACTION SUBMITTED")
     print("=" * 60)
+    print("Check Polygonscan for confirmation status.")
+    print("Run check_balance.py to verify new allowance.")
 
     return 0
 

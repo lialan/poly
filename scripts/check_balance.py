@@ -114,24 +114,29 @@ def format_time_ago(dt: datetime) -> str:
     return "just now"
 
 
-async def fetch_positions_and_trades(config: PolymarketConfig, num_trades: int):
-    """Fetch positions, open orders, and trade history."""
+def fetch_activity(wallet: str, limit: int = 10) -> list[dict]:
+    """Fetch activity history from Data API."""
+    try:
+        url = f"https://data-api.polymarket.com/activity?user={wallet}&limit={limit}"
+        resp = requests.get(url)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    return []
+
+
+async def fetch_positions_and_orders(config: PolymarketConfig):
+    """Fetch positions and open orders."""
     positions = []
     open_orders = []
-    trades = []
 
     async with PolymarketAPI(config) as api:
         # Fetch positions
         try:
-            positions = await api.get_positions(limit=20)
+            positions = await api.get_positions(limit=50)
         except Exception as e:
             print(f"  [WARN] Could not fetch positions: {e}")
-
-        # Fetch trades
-        try:
-            trades = await api.get_trades(limit=num_trades)
-        except Exception as e:
-            print(f"  [WARN] Could not fetch trades: {e}")
 
     # Fetch open orders (requires py-clob-client with auth)
     if config.has_trading_credentials:
@@ -148,7 +153,7 @@ async def fetch_positions_and_trades(config: PolymarketConfig, num_trades: int):
             if "not found" not in str(e).lower():
                 pass  # Silently ignore - user may not have any orders
 
-    return positions, open_orders, trades
+    return positions, open_orders
 
 
 def main():
@@ -240,19 +245,23 @@ def main():
         print(f"[ERROR] Failed to fetch allowance: {e}")
         return 1
 
-    # Fetch positions, orders, and trades
+    # Fetch positions and orders
     print("\n" + "-" * 60)
     print("POSITIONS & ORDERS")
     print("-" * 60)
 
-    positions, open_orders, trades = asyncio.run(
-        fetch_positions_and_trades(config, args.trades)
+    positions, open_orders = asyncio.run(
+        fetch_positions_and_orders(config)
     )
 
-    # Display positions
-    if positions:
-        print(f"\nOpen Positions ({len(positions)}):")
-        for pos in positions[:10]:  # Show max 10
+    # Separate positions into open and resolved
+    open_positions = [p for p in positions if not p.redeemable]
+    resolved_positions = [p for p in positions if p.redeemable]
+
+    # Display open positions
+    if open_positions:
+        print(f"\nOpen Positions ({len(open_positions)}):")
+        for pos in open_positions[:10]:  # Show max 10
             side = "YES" if pos.outcome == "Yes" else "NO"
             pnl = pos.cash_pnl
             pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
@@ -261,6 +270,17 @@ def main():
             print(f"    {side}: {pos.size:.2f} shares @ ${pos.avg_price:.2f} | PnL: {pnl_str}")
     else:
         print("\nNo open positions")
+
+    # Display resolved positions (redeemable)
+    if resolved_positions:
+        print(f"\nResolved Positions ({len(resolved_positions)}) - can be redeemed:")
+        for pos in resolved_positions[:5]:  # Show max 5
+            side = "YES" if pos.outcome == "Yes" else "NO"
+            pnl = pos.cash_pnl
+            pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+            result = "WON" if pnl > 0 else "LOST" if pnl < 0 else "PUSH"
+            slug = pos.slug[:35] if pos.slug else pos.condition_id[:35]
+            print(f"  {slug:<35} {result:>5} {pnl_str:>8}")
 
     # Display open orders
     if open_orders:
@@ -275,33 +295,34 @@ def main():
     else:
         print("\nNo open orders")
 
-    # Display trade history
+    # Fetch and display activity history
     print("\n" + "-" * 60)
-    print(f"RECENT TRADES (last {args.trades})")
+    print(f"ACTIVITY HISTORY (last {args.trades})")
     print("-" * 60)
 
-    if trades:
-        for trade in trades:
-            side = trade.side if hasattr(trade, 'side') else "?"
-            price = trade.price if hasattr(trade, 'price') else 0
-            size = trade.size if hasattr(trade, 'size') else 0
-            status = trade.status.value if hasattr(trade, 'status') else "?"
+    activity = fetch_activity(wallet, limit=args.trades)
 
-            # Get time
-            time_str = ""
-            if hasattr(trade, 'timestamp') and trade.timestamp:
-                time_str = format_time_ago(trade.timestamp)
+    if activity:
+        for item in activity:
+            act_type = item.get("type", "?")
+            side = item.get("side", "?")
+            size = float(item.get("size", 0))
+            price = float(item.get("price", 0))
+            usdc_size = float(item.get("usdcSize", 0))
+            outcome = item.get("outcome", "?")
+            slug = item.get("slug", "")[:30]
 
-            # Get market info
-            market = ""
-            if hasattr(trade, 'market_slug') and trade.market_slug:
-                market = trade.market_slug[:35]
-            elif hasattr(trade, 'asset_id') and trade.asset_id:
-                market = trade.asset_id[:35]
+            # Format timestamp
+            ts = item.get("timestamp", 0)
+            if ts:
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                time_str = format_time_ago(dt)
+            else:
+                time_str = "?"
 
-            print(f"  {side:4} {size:>8.2f} @ {price:.2f} | {status:9} | {time_str:>8} | {market}")
+            print(f"  {side:4} {size:>7.2f} {outcome:>4} @ {price:.2f} (${usdc_size:.2f}) | {time_str:>8} | {slug}")
     else:
-        print("No recent trades")
+        print("No activity history")
 
     # Contract addresses
     print("\n" + "-" * 60)

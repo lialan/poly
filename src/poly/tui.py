@@ -64,20 +64,124 @@ def clear_screen():
     os.system("cls" if os.name == "nt" else "clear")
 
 
-def run_script(script: ScriptInfo) -> None:
+# Script-specific option hints
+SCRIPT_OPTIONS = {
+    "trading_backtest.py": """
+  Options:
+    -a, --asset btc|eth     Asset to trade (default: btc)
+    -t, --hours-ago N       Hours of history (default: 6)
+    -c, --capital N         Initial capital USD (default: 100)
+    -b, --bet-size N        Bet size USD (default: 10)
+    -p, --profit-target N   Profit target ratio (default: 0.25)
+    -m, --min-mispricing N  Min mispricing to trade (default: 0.05)
+    -i, --trade-interval N  Seconds between trades (default: 60)
+    -q, --quiet             Suppress trade-by-trade output
+
+  Examples:
+    -t 12 -q                12 hours, quiet mode
+    -a eth -t 24            ETH, 24 hours
+    -c 1000 -b 50 -t 12     $1000 capital, $50 bets""",
+
+    "btc_15m_backtest.py": """
+  Options: (none - runs with all available data)""",
+
+    "run_trading_bot.py": """
+  Options:
+    --asset btc|eth         Asset to trade (default: btc)
+    --interval N            Decision interval seconds (default: 3)""",
+
+    "trade_dry_run.py": """
+  Options:
+    --live                  Place real test order (canceled immediately)""",
+
+    "cloudrun_collector.py": """
+  Options: (none - runs continuously)""",
+
+    "query_bigtable.py": """
+  Options:
+    --count N               Number of rows to fetch (default: 10)
+    --table NAME            Table name to query""",
+
+    "bet_btc_15m.py": """
+  Options:
+    -s, --side up|down      Side to bet on (required)
+    -a, --amount N          Amount in USD to bet (required)
+    -p, --price N           Limit price (default: market price)
+    -n, --dry-run           Preview order without placing
+
+  Examples:
+    --side up --amount 10           Bet $10 on UP
+    --side down --amount 5 --dry-run   Dry run $5 on DOWN""",
+
+    "approve_usdc.py": """
+  Options:
+    -a, --amount N          Amount to approve (default: unlimited)
+    -r, --revoke            Revoke approval (set to 0)
+    -n, --dry-run           Preview transaction without sending
+
+  Examples:
+    (no args)               Approve unlimited USDC
+    --amount 100            Approve $100 USDC
+    --revoke                Revoke approval""",
+
+    "check_balance.py": """
+  Options:
+    -w, --wallet ADDR       Check specific wallet address
+    -t, --trades N          Number of trades to show (default: 10)""",
+}
+
+
+def prompt_for_args(script: ScriptInfo) -> list[str]:
+    """Prompt user for script arguments."""
+    # Show script-specific options if available
+    options_hint = SCRIPT_OPTIONS.get(script.name)
+    if options_hint:
+        print(options_hint)
+    else:
+        print("\n  (No options documented - check script with --help)")
+
+    print("\n  Enter arguments (or press Enter for defaults):")
+    try:
+        args_input = input("  > ").strip()
+        if args_input:
+            return args_input.split()
+    except (EOFError, KeyboardInterrupt):
+        pass
+    return []
+
+
+def run_script(script: ScriptInfo, prompt_args: bool = True) -> None:
     """Run a script and wait for user input after."""
     clear_screen()
     print(f"\n{'=' * 60}")
     print(f"  Running: {script.name}")
     print(f"  {script.description}")
-    print(f"{'=' * 60}\n")
+    print(f"{'=' * 60}")
+
+    # Prompt for arguments
+    extra_args = []
+    if prompt_args:
+        extra_args = prompt_for_args(script)
+
+    if extra_args:
+        print(f"\n  Args: {' '.join(extra_args)}")
+
+    print()
 
     project_root = Path(__file__).parent.parent.parent
 
+    # Set environment variables for Bigtable and Python path
+    env = os.environ.copy()
+    env.setdefault("BIGTABLE_PROJECT_ID", "poly-collector")
+    env.setdefault("BIGTABLE_INSTANCE_ID", "poly-data")
+    env["PYTHONPATH"] = str(project_root / "src")
+
     try:
+        cmd = [sys.executable, str(script.path)] + extra_args
         result = subprocess.run(
-            [sys.executable, str(script.path)],
+            cmd,
             cwd=project_root,
+            env=env,
         )
 
         print(f"\n{'=' * 60}")
@@ -172,7 +276,7 @@ def main():
 
         # Build main menu options
         main_options = []
-        category_order = ["trading", "test", "simulation", "collector", "utility"]
+        category_order = ["trading", "manual_trade", "test", "simulation", "collector", "utility"]
 
         for cat in category_order:
             if cat in by_category:
