@@ -158,6 +158,8 @@ def parse_args():
                         help="Run for single epoch only (don't loop)")
     parser.add_argument("-i", "--ignore-first-seconds", type=int, default=0, metavar="N",
                         help="Ignore triggers for first N seconds of epoch")
+    parser.add_argument("--min-delta", type=float, default=0.005, metavar="PCT",
+                        help="Min abs(log delta %%) to trigger (default: 0.005)")
     return parser.parse_args()
 
 
@@ -303,6 +305,7 @@ async def monitor_and_trade(
     dry_run: bool = False,
     wait_for_resolution_flag: bool = True,
     ignore_first_seconds: int = 0,
+    min_delta_pct: float = 0.005,
 ) -> dict:
     """Monitor prices via WebSocket and place order when threshold is reached."""
     from poly.markets import fetch_current_prediction
@@ -332,7 +335,6 @@ async def monitor_and_trade(
     result: dict = {"market_slug": market.slug, "success": False}
     threshold_decimal = Decimal(str(threshold))
     trigger_level = threshold_decimal - Decimal("0.01")
-    min_delta_pct = 0.005  # Minimum abs(log_delta_pct) required to trigger
 
     epoch_start_ts = slug_to_timestamp(market.slug) or int(time.time())
     price_state = {"btc": PriceState(), "eth": PriceState()}
@@ -453,12 +455,13 @@ async def monitor_and_trade(
 
 async def run_single_epoch(api: PolymarketAPI, asset: Asset, horizon: MarketHorizon,
                             threshold: float, size: float, dry_run: bool,
-                            wait_for_resolution: bool, ignore_first_seconds: int = 0) -> dict:
+                            wait_for_resolution: bool, ignore_first_seconds: int = 0,
+                            min_delta_pct: float = 0.005) -> dict:
     """Run the strategy for a single epoch."""
     result = await monitor_and_trade(
         api=api, asset=asset, horizon=horizon, threshold=threshold, size=size,
         dry_run=dry_run, wait_for_resolution_flag=wait_for_resolution,
-        ignore_first_seconds=ignore_first_seconds,
+        ignore_first_seconds=ignore_first_seconds, min_delta_pct=min_delta_pct,
     )
     print_epoch_result(result)
     return result
@@ -479,7 +482,7 @@ async def main() -> int:
     print(f"  Asset:      {asset.value}")
     print(f"  Horizon:    {horizon.name}")
     print(f"  Threshold:  {args.threshold:.0%} (triggers at {args.threshold - 0.01:.0%})")
-    print(f"  Delta guard: abs(delta) > 0.005%")
+    print(f"  Delta guard: abs(delta) > {args.min_delta}%")
     print(f"  Bet amount: ${args.bet:.2f}")
     print(f"  Size:       {size:.2f} shares")
     print(f"  Dry run:    {args.dry_run}")
@@ -525,7 +528,7 @@ async def main() -> int:
                 result = await run_single_epoch(
                     api=api, asset=asset, horizon=horizon, threshold=args.threshold,
                     size=size, dry_run=args.dry_run, wait_for_resolution=not args.no_wait,
-                    ignore_first_seconds=args.ignore_first_seconds,
+                    ignore_first_seconds=args.ignore_first_seconds, min_delta_pct=args.min_delta,
                 )
                 if result.get("won") is True:
                     wins += 1
