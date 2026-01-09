@@ -332,10 +332,12 @@ async def monitor_and_trade(
     result: dict = {"market_slug": market.slug, "success": False}
     threshold_decimal = Decimal(str(threshold))
     trigger_level = threshold_decimal - Decimal("0.01")
+    min_delta_pct = 0.005  # Minimum abs(log_delta_pct) required to trigger
 
     epoch_start_ts = slug_to_timestamp(market.slug) or int(time.time())
     price_state = {"btc": PriceState(), "eth": PriceState()}
     triggered = asyncio.Event()
+    order_placed = asyncio.Event()  # For post-bet monitoring
     trigger_info: Optional[TriggerInfo] = None
 
     def on_binance_kline(kline):
@@ -346,9 +348,6 @@ async def monitor_and_trade(
 
     def on_update(update):
         nonlocal trigger_info
-        if triggered.is_set():
-            return
-
         state = feed.get_market(market.slug)
         if not state or not state.yes_mid or not state.no_mid:
             return
@@ -357,16 +356,30 @@ async def monitor_and_trade(
         elapsed = int(time.time()) - epoch_start_ts
         ps = price_state["btc"] if asset == Asset.BTC else price_state["eth"]
         spot_str = ps.format_display()
+        delta = ps.log_delta_pct
 
-        # Display status
-        status = f"  [{elapsed:4d}s] {spot_str} | UP: {float(up_price):.3f} | DOWN: {float(down_price):.3f}"
+        # Display status (continues even after order placed)
+        prefix = "[POST]" if order_placed.is_set() else ""
+        status = f"  {prefix}[{elapsed:4d}s] {spot_str} | UP: {float(up_price):.3f} | DOWN: {float(down_price):.3f}"
+
+        if triggered.is_set():
+            # After trigger, just show status for study
+            print(status + "      ", end="\r")
+            return
+
         if elapsed < ignore_first_seconds:
             print(status + f" (ignoring until {ignore_first_seconds}s)", end="\r")
             return
         print(status, end="\r")
 
-        # Check trigger
+        # Check trigger - requires both price threshold AND delta threshold
         if up_price >= trigger_level or down_price >= trigger_level:
+            # Guard: require abs(delta) > 0.005%
+            if delta is None or abs(delta) < min_delta_pct:
+                delta_str = f"{delta:+.3f}%" if delta is not None else "N/A"
+                print(status + f" (delta {delta_str} < {min_delta_pct}%)", end="\r")
+                return
+
             side = "UP" if up_price >= trigger_level else "DOWN"
             token_id = market.up_token_id if side == "UP" else market.down_token_id
             price = float(up_price) if side == "UP" else float(down_price)
@@ -374,7 +387,7 @@ async def monitor_and_trade(
             trigger_info = TriggerInfo(
                 side=side, token_id=token_id, trigger_price=price,
                 elapsed_seconds=elapsed, spot_price=ps.close_price, spot_open=ps.open_price,
-                log_delta_pct=ps.log_delta_pct,
+                log_delta_pct=delta,
                 up_bid=float(state.yes_bid) if state.yes_bid else None,
                 up_ask=float(state.yes_ask) if state.yes_ask else None,
                 down_bid=float(state.no_bid) if state.no_bid else None,
@@ -406,12 +419,21 @@ async def monitor_and_trade(
             print(f"    [DRY RUN] Would place BUY {trigger_info.side} order")
             result.update({"success": True, "order_id": "dry_run", "triggered_side": trigger_info.side,
                           "trigger_price": trigger_info.trigger_price})
+            order_placed.set()
         else:
             order_result = await place_order_and_check(api, trigger_info.token_id,
                                                         trigger_info.trigger_price, size, trigger_info.side)
             result.update(order_result)
             result["triggered_side"] = trigger_info.side
             result["trigger_price"] = trigger_info.trigger_price
+            if order_result.get("success"):
+                order_placed.set()
+
+        # Wait for resolution if requested (feeds keep running for study)
+        if result.get("success") and wait_for_resolution_flag and not dry_run and resolution_time:
+            print("\n[4] Monitoring continues during resolution wait...")
+            resolution_result = await wait_for_resolution(api, market.slug, resolution_time, result["triggered_side"])
+            result.update(resolution_result)
 
     except (asyncio.CancelledError, KeyboardInterrupt):
         print("\n\n[CANCELLED] Monitoring stopped")
@@ -425,11 +447,6 @@ async def monitor_and_trade(
                 await task
             except asyncio.CancelledError:
                 pass
-
-    # Wait for resolution if requested
-    if result.get("success") and wait_for_resolution_flag and not dry_run and resolution_time:
-        resolution_result = await wait_for_resolution(api, market.slug, resolution_time, result["triggered_side"])
-        result.update(resolution_result)
 
     return result
 
@@ -462,6 +479,7 @@ async def main() -> int:
     print(f"  Asset:      {asset.value}")
     print(f"  Horizon:    {horizon.name}")
     print(f"  Threshold:  {args.threshold:.0%} (triggers at {args.threshold - 0.01:.0%})")
+    print(f"  Delta guard: abs(delta) > 0.005%")
     print(f"  Bet amount: ${args.bet:.2f}")
     print(f"  Size:       {size:.2f} shares")
     print(f"  Dry run:    {args.dry_run}")
