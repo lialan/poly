@@ -35,11 +35,13 @@ import asyncio
 import math
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional
+
+import requests
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -55,6 +57,59 @@ from poly import (
     slug_to_timestamp,
 )
 from poly.api.binance_ws import BinanceKlineStream, BTCUSDT, ETHUSDT, INTERVAL_1M
+
+
+class TimeSync:
+    """Synchronized time service using Binance server time as reference."""
+
+    BINANCE_TIME_URL = "https://api.binance.com/api/v3/time"
+
+    def __init__(self):
+        self.offset_ms: int = 0  # Local time - server time (ms)
+        self.last_sync: float = 0
+        self.sync_count: int = 0
+
+    def sync(self) -> bool:
+        """Sync with Binance server time. Returns True if successful."""
+        try:
+            local_before = int(time.time() * 1000)
+            resp = requests.get(self.BINANCE_TIME_URL, timeout=5)
+            local_after = int(time.time() * 1000)
+
+            if resp.status_code == 200:
+                server_time = resp.json()["serverTime"]
+                # Estimate local time at server response (midpoint of request)
+                local_mid = (local_before + local_after) // 2
+                self.offset_ms = local_mid - server_time
+                self.last_sync = time.time()
+                self.sync_count += 1
+                return True
+        except Exception:
+            pass
+        return False
+
+    def now_ms(self) -> int:
+        """Get current synchronized time in milliseconds."""
+        return int(time.time() * 1000) - self.offset_ms
+
+    def now(self) -> float:
+        """Get current synchronized time in seconds."""
+        return self.now_ms() / 1000
+
+    def now_dt(self) -> datetime:
+        """Get current synchronized time as datetime."""
+        return datetime.fromtimestamp(self.now(), tz=timezone.utc)
+
+    @property
+    def offset_sec(self) -> float:
+        """Get offset in seconds (positive = local ahead of server)."""
+        return self.offset_ms / 1000
+
+    def format_status(self) -> str:
+        """Format sync status for display."""
+        if self.sync_count == 0:
+            return "not synced"
+        return f"offset={self.offset_ms:+d}ms"
 
 # Polygon contract addresses
 USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
@@ -82,15 +137,35 @@ ERC20_ABI = [
 
 @dataclass
 class PriceState:
-    """Current price state from Binance."""
+    """Current price state from Binance with timestamp alignment."""
     open_price: Optional[float] = None
     close_price: Optional[float] = None
+    kline_start_ms: Optional[int] = None  # Kline open time (Binance server time)
+    kline_close_ms: Optional[int] = None  # Kline close time (Binance server time)
+    update_time_ms: Optional[int] = None  # When we received this update (synced time)
 
     @property
     def log_delta_pct(self) -> Optional[float]:
         """Calculate log return as percentage."""
         if self.open_price and self.close_price and self.open_price > 0:
             return (math.log(self.close_price) - math.log(self.open_price)) * 100
+        return None
+
+    @property
+    def kline_age_ms(self) -> Optional[int]:
+        """How old is this kline data (ms since kline started)."""
+        if self.kline_start_ms and self.update_time_ms:
+            return self.update_time_ms - self.kline_start_ms
+        return None
+
+    @property
+    def kline_progress_pct(self) -> Optional[float]:
+        """Progress through the current kline (0-100%)."""
+        if self.kline_start_ms and self.kline_close_ms and self.update_time_ms:
+            duration = self.kline_close_ms - self.kline_start_ms
+            elapsed = self.update_time_ms - self.kline_start_ms
+            if duration > 0:
+                return min(100.0, max(0.0, (elapsed / duration) * 100))
         return None
 
     def format_display(self) -> str:
@@ -101,6 +176,13 @@ class PriceState:
         if delta is not None:
             return f"${self.close_price:,.0f} ({delta:+.3f}%)"
         return f"${self.close_price:,.0f}"
+
+    def format_time_info(self) -> str:
+        """Format kline timing info for display."""
+        progress = self.kline_progress_pct
+        if progress is not None:
+            return f"{progress:.0f}%"
+        return "-"
 
 
 @dataclass
@@ -117,6 +199,8 @@ class TriggerInfo:
     up_ask: Optional[float]
     down_bid: Optional[float]
     down_ask: Optional[float]
+    kline_progress_pct: Optional[float] = None  # Progress through current 1m kline
+    trigger_time_ms: Optional[int] = None  # Synchronized trigger timestamp
 
     def print_details(self, threshold: float):
         """Print trigger details."""
@@ -124,11 +208,16 @@ class TriggerInfo:
         print(f"    Epoch time:  {self.elapsed_seconds}s")
 
         if self.spot_price and self.log_delta_pct is not None:
-            print(f"    Spot price:  ${self.spot_price:,.2f} (open: ${self.spot_open:,.2f}, delta: {self.log_delta_pct:+.3f}%)")
+            kline_str = f", kline: {self.kline_progress_pct:.0f}%" if self.kline_progress_pct else ""
+            print(f"    Spot price:  ${self.spot_price:,.2f} (open: ${self.spot_open:,.2f}, delta: {self.log_delta_pct:+.3f}%{kline_str})")
         elif self.spot_price:
             print(f"    Spot price:  ${self.spot_price:,.2f}")
         else:
             print(f"    Spot price:  -")
+
+        if self.trigger_time_ms:
+            trigger_dt = datetime.fromtimestamp(self.trigger_time_ms / 1000, tz=timezone.utc)
+            print(f"    Trigger at:  {trigger_dt.strftime('%H:%M:%S.%f')[:-3]} UTC")
 
         up_bid_str = f"{self.up_bid:.3f}" if self.up_bid else "-"
         up_ask_str = f"{self.up_ask:.3f}" if self.up_ask else "-"
@@ -306,6 +395,7 @@ async def monitor_and_trade(
     wait_for_resolution_flag: bool = True,
     ignore_first_seconds: int = 0,
     min_delta_pct: float = 0.005,
+    time_sync: Optional[TimeSync] = None,
 ) -> dict:
     """Monitor prices via WebSocket and place order when threshold is reached."""
     from poly.markets import fetch_current_prediction
@@ -336,17 +426,27 @@ async def monitor_and_trade(
     threshold_decimal = Decimal(str(threshold))
     trigger_level = threshold_decimal - Decimal("0.01")
 
+    # Use synchronized time if available, otherwise fall back to local time
+    def get_now_ms() -> int:
+        return time_sync.now_ms() if time_sync else int(time.time() * 1000)
+
     epoch_start_ts = slug_to_timestamp(market.slug) or int(time.time())
+    epoch_start_ms = epoch_start_ts * 1000
     price_state = {"btc": PriceState(), "eth": PriceState()}
     triggered = asyncio.Event()
     order_placed = asyncio.Event()  # For post-bet monitoring
     trigger_info: Optional[TriggerInfo] = None
 
     def on_binance_kline(kline):
+        """Update price state with kline data including timestamps."""
         key = "btc" if kline.symbol == "BTCUSDT" else "eth" if kline.symbol == "ETHUSDT" else None
         if key:
-            price_state[key].open_price = float(kline.open)
-            price_state[key].close_price = float(kline.close)
+            ps = price_state[key]
+            ps.open_price = float(kline.open)
+            ps.close_price = float(kline.close)
+            ps.kline_start_ms = kline.start_time  # Binance server time
+            ps.kline_close_ms = kline.close_time  # Binance server time
+            ps.update_time_ms = get_now_ms()      # Synchronized local time
 
     def on_update(update):
         nonlocal trigger_info
@@ -355,14 +455,16 @@ async def monitor_and_trade(
             return
 
         up_price, down_price = state.yes_mid, state.no_mid
-        elapsed = int(time.time()) - epoch_start_ts
+        now_ms = get_now_ms()
+        elapsed = (now_ms - epoch_start_ms) // 1000
         ps = price_state["btc"] if asset == Asset.BTC else price_state["eth"]
         spot_str = ps.format_display()
         delta = ps.log_delta_pct
+        kline_pct = ps.format_time_info()
 
         # Display status (continues even after order placed)
         prefix = "[POST]" if order_placed.is_set() else ""
-        status = f"  {prefix}[{elapsed:4d}s] {spot_str} | UP: {float(up_price):.3f} | DOWN: {float(down_price):.3f}"
+        status = f"  {prefix}[{elapsed:4d}s|{kline_pct:>3}] {spot_str} | UP: {float(up_price):.3f} | DOWN: {float(down_price):.3f}"
 
         if triggered.is_set():
             # After trigger, just show status for study
@@ -394,6 +496,8 @@ async def monitor_and_trade(
                 up_ask=float(state.yes_ask) if state.yes_ask else None,
                 down_bid=float(state.no_bid) if state.no_bid else None,
                 down_ask=float(state.no_ask) if state.no_ask else None,
+                kline_progress_pct=ps.kline_progress_pct,
+                trigger_time_ms=now_ms,
             )
             triggered.set()
 
@@ -456,12 +560,14 @@ async def monitor_and_trade(
 async def run_single_epoch(api: PolymarketAPI, asset: Asset, horizon: MarketHorizon,
                             threshold: float, size: float, dry_run: bool,
                             wait_for_resolution: bool, ignore_first_seconds: int = 0,
-                            min_delta_pct: float = 0.005) -> dict:
+                            min_delta_pct: float = 0.005,
+                            time_sync: Optional[TimeSync] = None) -> dict:
     """Run the strategy for a single epoch."""
     result = await monitor_and_trade(
         api=api, asset=asset, horizon=horizon, threshold=threshold, size=size,
         dry_run=dry_run, wait_for_resolution_flag=wait_for_resolution,
         ignore_first_seconds=ignore_first_seconds, min_delta_pct=min_delta_pct,
+        time_sync=time_sync,
     )
     print_epoch_result(result)
     return result
@@ -491,12 +597,20 @@ async def main() -> int:
     if args.ignore_first_seconds > 0:
         print(f"  Ignore:     First {args.ignore_first_seconds}s of each epoch")
 
+    # Initialize time sync with Binance server
+    print("\nSyncing time with Binance...")
+    time_sync = TimeSync()
+    if time_sync.sync():
+        print(f"  Time sync:  {time_sync.format_status()}")
+    else:
+        print("  Time sync:  FAILED (using local time)")
+
     # Load credentials
     poly_config = None
     if not args.dry_run:
         try:
             poly_config = PolymarketConfig.load()
-            print(f"\n  Wallet:     {poly_config.wallet_address}")
+            print(f"  Wallet:     {poly_config.wallet_address}")
             if not poly_config.has_trading_credentials:
                 print("\n[ERROR] No trading credentials. Set POLYMARKET_PRIVATE_KEY")
                 return 1
@@ -529,6 +643,7 @@ async def main() -> int:
                     api=api, asset=asset, horizon=horizon, threshold=args.threshold,
                     size=size, dry_run=args.dry_run, wait_for_resolution=not args.no_wait,
                     ignore_first_seconds=args.ignore_first_seconds, min_delta_pct=args.min_delta,
+                    time_sync=time_sync,
                 )
                 if result.get("won") is True:
                     wins += 1
