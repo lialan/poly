@@ -44,8 +44,8 @@ def categorize(filename: str) -> str:
     # Simulation scripts
     if any(p in name for p in ["simulation", "simulate"]):
         return "simulation"
-    # Manual trade scripts (bet_*.py, approve_*.py, check_balance, redeem_positions)
-    if name.startswith("bet_") or name.startswith("approve_") or name.startswith("redeem_") or name == "check_balance.py":
+    # Manual trade scripts (bet_*.py, approve_*.py, check_balance, redeem_positions, list_orders)
+    if name.startswith("bet_") or name.startswith("approve_") or name.startswith("redeem_") or name in ("check_balance.py", "list_orders.py"):
         return "manual_trade"
     # Query scripts (query_*.py) - but not extremes analysis
     if name.startswith("query_") and "extremes" not in name:

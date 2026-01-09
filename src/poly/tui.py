@@ -146,6 +146,16 @@ SCRIPT_OPTIONS = {
     --dry-run               List redeemable positions
     (no args)               Redeem all resolved positions""",
 
+    "list_orders.py": """
+  Options:
+    -c, --cancel            Interactive cancel mode
+    -c ORDER_ID             Cancel specific order by ID
+
+  Examples:
+    (no args)               List all open orders
+    -c                      List and prompt to cancel
+    -c abc123...            Cancel specific order""",
+
     "generate_rolling_klines.py": """
   Options:
     -w, --window N          Rolling window size in minutes (default: 3)
