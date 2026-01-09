@@ -51,6 +51,8 @@ class MarketAnalysis:
     time_to_threshold: float | None  # seconds from market start to threshold hit
     # Orderbook depth at threshold
     threshold_depth: float | None  # total shares in orderbook when threshold hit
+    # Time from approach zone (threshold ±5%) to threshold
+    time_from_approach: float | None  # seconds from first entering approach zone to threshold hit
 
 
 def get_yes_mid_price(orderbook_json: str) -> float | None:
@@ -127,6 +129,7 @@ def analyze_market(snapshots: list[dict], threshold: float) -> MarketAnalysis:
             start_time=None,
             time_to_threshold=None,
             threshold_depth=None,
+            time_from_approach=None,
         )
 
     # Get start time and price
@@ -137,24 +140,43 @@ def analyze_market(snapshots: list[dict], threshold: float) -> MarketAnalysis:
     HIGH_THRESHOLD = (100 - threshold) / 100  # e.g., 15 -> 0.85
     LOW_THRESHOLD = threshold / 100            # e.g., 15 -> 0.15
 
+    # Approach zone: threshold ±5%
+    APPROACH_MARGIN = 0.05
+    HIGH_APPROACH = HIGH_THRESHOLD - APPROACH_MARGIN  # e.g., 0.85 - 0.05 = 0.80
+    LOW_APPROACH = LOW_THRESHOLD + APPROACH_MARGIN    # e.g., 0.15 + 0.05 = 0.20
+
     # Find first extreme and price at that point
     first_extreme = None
     first_extreme_time = None
     threshold_price = None
     threshold_depth = None
+    approach_time = None  # when first entered approach zone
 
     for ts, prob, price, ob_json in data_points:
+        # Track approach zone entry (before hitting threshold)
+        if approach_time is None:
+            if prob >= HIGH_APPROACH and prob < HIGH_THRESHOLD:
+                approach_time = ts
+            elif prob <= LOW_APPROACH and prob > LOW_THRESHOLD:
+                approach_time = ts
+
         if prob >= HIGH_THRESHOLD:
             first_extreme = "high"
             first_extreme_time = ts
             threshold_price = price if price > 0 else None
             threshold_depth = get_orderbook_depth(ob_json)
+            # If we hit threshold without going through approach zone first, use threshold time
+            if approach_time is None:
+                approach_time = ts
             break
         elif prob <= LOW_THRESHOLD:
             first_extreme = "low"
             first_extreme_time = ts
             threshold_price = price if price > 0 else None
             threshold_depth = get_orderbook_depth(ob_json)
+            # If we hit threshold without going through approach zone first, use threshold time
+            if approach_time is None:
+                approach_time = ts
             break
 
     # Calculate log price delta and time to threshold
@@ -165,6 +187,11 @@ def analyze_market(snapshots: list[dict], threshold: float) -> MarketAnalysis:
     time_to_threshold = None
     if first_extreme_time and start_time:
         time_to_threshold = first_extreme_time - start_time
+
+    # Calculate time from approach zone to threshold
+    time_from_approach = None
+    if first_extreme_time and approach_time:
+        time_from_approach = first_extreme_time - approach_time
 
     # Determine final outcome from last snapshot
     final_ts, final_prob, _, _ = data_points[-1]
@@ -197,6 +224,7 @@ def analyze_market(snapshots: list[dict], threshold: float) -> MarketAnalysis:
         start_time=start_time,
         time_to_threshold=time_to_threshold,
         threshold_depth=threshold_depth,
+        time_from_approach=time_from_approach,
     )
 
 
@@ -333,6 +361,18 @@ Examples:
             print(f"\n  P(UP wins | hit {high_pct:.0f}% first) = {prob:.1f}%")
             print(f"  (Based on {resolved_high} resolved markets)")
 
+            # Time from approach zone (threshold-5%) to threshold
+            approach_times_correct = [a.time_from_approach for a in hit_high_then_up if a.time_from_approach is not None]
+            approach_times_wrong = [a.time_from_approach for a in hit_high_then_down if a.time_from_approach is not None]
+            approach_times_all = approach_times_correct + approach_times_wrong
+            if approach_times_all:
+                print(f"\n  Time from {high_pct-5:.0f}% to {high_pct:.0f}% (approach -> threshold):")
+                print(f"    All:     mean={sum(approach_times_all)/len(approach_times_all):.1f}s, median={sorted(approach_times_all)[len(approach_times_all)//2]:.1f}s (n={len(approach_times_all)})")
+                if approach_times_correct:
+                    print(f"    Correct: mean={sum(approach_times_correct)/len(approach_times_correct):.1f}s, median={sorted(approach_times_correct)[len(approach_times_correct)//2]:.1f}s (n={len(approach_times_correct)})")
+                if approach_times_wrong:
+                    print(f"    Failed:  mean={sum(approach_times_wrong)/len(approach_times_wrong):.1f}s, median={sorted(approach_times_wrong)[len(approach_times_wrong)//2]:.1f}s (n={len(approach_times_wrong)})")
+
         # Log price delta for correctly predicted (hit high -> UP won)
         deltas = [a.log_price_delta for a in hit_high_then_up if a.log_price_delta is not None]
         if deltas:
@@ -389,10 +429,6 @@ Examples:
             sorted_deltas = sorted(deltas_wrong)
             median = sorted_deltas[len(sorted_deltas)//2]
             print(f"    Median: {median*100:+.4f}%")
-            print(f"    Failed markets:")
-            for a in hit_high_then_down:
-                delta_str = f"{a.log_price_delta*100:+.4f}%" if a.log_price_delta else "N/A"
-                print(f"      {a.market_id} (delta: {delta_str})")
 
     print()
 
@@ -409,6 +445,18 @@ Examples:
             prob = len(hit_low_then_down) / resolved_low * 100
             print(f"\n  P(DOWN wins | hit {low_pct:.0f}% first) = {prob:.1f}%")
             print(f"  (Based on {resolved_low} resolved markets)")
+
+            # Time from approach zone (threshold+5%) to threshold
+            approach_times_correct = [a.time_from_approach for a in hit_low_then_down if a.time_from_approach is not None]
+            approach_times_wrong = [a.time_from_approach for a in hit_low_then_up if a.time_from_approach is not None]
+            approach_times_all = approach_times_correct + approach_times_wrong
+            if approach_times_all:
+                print(f"\n  Time from {low_pct+5:.0f}% to {low_pct:.0f}% (approach -> threshold):")
+                print(f"    All:     mean={sum(approach_times_all)/len(approach_times_all):.1f}s, median={sorted(approach_times_all)[len(approach_times_all)//2]:.1f}s (n={len(approach_times_all)})")
+                if approach_times_correct:
+                    print(f"    Correct: mean={sum(approach_times_correct)/len(approach_times_correct):.1f}s, median={sorted(approach_times_correct)[len(approach_times_correct)//2]:.1f}s (n={len(approach_times_correct)})")
+                if approach_times_wrong:
+                    print(f"    Failed:  mean={sum(approach_times_wrong)/len(approach_times_wrong):.1f}s, median={sorted(approach_times_wrong)[len(approach_times_wrong)//2]:.1f}s (n={len(approach_times_wrong)})")
 
         # Log price delta for correctly predicted (hit low -> DOWN won)
         deltas = [a.log_price_delta for a in hit_low_then_down if a.log_price_delta is not None]
@@ -466,10 +514,6 @@ Examples:
             sorted_deltas = sorted(deltas_wrong)
             median = sorted_deltas[len(sorted_deltas)//2]
             print(f"    Median: {median*100:+.4f}%")
-            print(f"    Failed markets:")
-            for a in hit_low_then_up:
-                delta_str = f"{a.log_price_delta*100:+.4f}%" if a.log_price_delta else "N/A"
-                print(f"      {a.market_id} (delta: {delta_str})")
 
     print()
 
