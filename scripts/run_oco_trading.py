@@ -535,11 +535,29 @@ async def monitor_and_trade(
             if order_result.get("success"):
                 order_placed.set()
 
-        # Wait for resolution if requested (feeds keep running for study)
-        if result.get("success") and wait_for_resolution_flag and not dry_run and resolution_time:
+        # Wait for resolution (feeds keep running for study)
+        if result.get("success") and wait_for_resolution_flag and resolution_time:
             print("\n[4] Monitoring continues during resolution wait...")
-            resolution_result = await wait_for_resolution(api, market.slug, resolution_time, result["triggered_side"])
-            result.update(resolution_result)
+            print("    (Status updates continue in background)\n")
+            if dry_run:
+                # For dry run, just wait until resolution time while showing updates
+                now = datetime.now(timezone.utc)
+                wait_seconds = (resolution_time - now).total_seconds()
+                if wait_seconds > 0:
+                    print(f"    Resolution in {wait_seconds:.0f} seconds...")
+                    try:
+                        while wait_seconds > 0:
+                            sleep_chunk = min(wait_seconds, 30)
+                            await asyncio.sleep(sleep_chunk)
+                            wait_seconds -= sleep_chunk
+                            if wait_seconds > 0:
+                                print(f"    {wait_seconds:.0f}s remaining...")
+                        print("    [DRY RUN] Market would resolve now")
+                    except (asyncio.CancelledError, KeyboardInterrupt):
+                        print("\n    [CANCELLED] Stopped waiting")
+            else:
+                resolution_result = await wait_for_resolution(api, market.slug, resolution_time, result["triggered_side"])
+                result.update(resolution_result)
 
     except (asyncio.CancelledError, KeyboardInterrupt):
         print("\n\n[CANCELLED] Monitoring stopped")
