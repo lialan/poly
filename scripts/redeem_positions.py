@@ -79,6 +79,8 @@ def redeem_position(
     w3: Web3,
     private_key: str,
     condition_id: str,
+    nonce: int,
+    gas_price: int,
     dry_run: bool = False,
 ) -> dict:
     """Redeem a single position.
@@ -87,6 +89,8 @@ def redeem_position(
         w3: Web3 instance
         private_key: Private key for signing
         condition_id: Condition ID (hex string with 0x prefix)
+        nonce: Transaction nonce to use
+        gas_price: Gas price to use
         dry_run: If True, don't actually send transaction
 
     Returns:
@@ -120,10 +124,7 @@ def redeem_position(
         return {"dry_run": True, "condition_id": condition_id.hex()}
 
     try:
-        # Build transaction
-        nonce = w3.eth.get_transaction_count(wallet)
-        gas_price = w3.eth.gas_price
-
+        # Build transaction with provided nonce
         tx = ctf.functions.redeemPositions(
             Web3.to_checksum_address(USDC_E_ADDRESS),
             parent_collection_id,
@@ -282,7 +283,15 @@ Examples:
     # Redeem each position
     print(f"\n[4] Redeeming {len(positions)} position(s)...")
 
+    # Get initial nonce and gas price once (to avoid nonce conflicts)
+    wallet = Web3.to_checksum_address(config.wallet_address)
+    nonce = w3.eth.get_transaction_count(wallet)
+    gas_price = w3.eth.gas_price
+    print(f"    Starting nonce: {nonce}, gas price: {w3.from_wei(gas_price, 'gwei'):.1f} gwei")
+
     success_count = 0
+    tx_hashes = []
+
     for i, pos in enumerate(positions, 1):
         slug = pos.slug[:30] if pos.slug else pos.condition_id[:30]
         print(f"\n    [{i}/{len(positions)}] {slug}...")
@@ -291,17 +300,23 @@ Examples:
             w3=w3,
             private_key=config.private_key,
             condition_id=pos.condition_id,
+            nonce=nonce,
+            gas_price=gas_price,
             dry_run=False,
         )
 
         if result.get("success"):
             print(f"      [OK] TX: {result['tx_hash'][:20]}...")
             print(f"      Polygonscan: {result['polygonscan']}")
+            tx_hashes.append(result['tx_hash'])
             success_count += 1
+            nonce += 1  # Increment nonce for next transaction
         elif result.get("error"):
             print(f"      [ERROR] {result['error'][:60]}")
+            # Don't increment nonce on error - tx wasn't sent
         else:
             print(f"      [SKIP] {result}")
+
 
     print("\n" + "=" * 60)
     print(f"REDEMPTION COMPLETE: {success_count}/{len(positions)} succeeded")

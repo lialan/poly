@@ -38,6 +38,9 @@ poly/
 │   │   ├── bigtable.py       # Google Cloud Bigtable
 │   │   ├── sqlite.py         # SQLite database
 │   │   └── db_writer.py      # Database abstraction layer
+│   ├── strategies/           # Trading strategies
+│   │   ├── __init__.py       # Strategy exports
+│   │   └── oco_limit.py      # OCO limit order strategy
 │   ├── markets.py            # Asset, MarketHorizon enums
 │   ├── market_snapshot.py    # MarketSnapshot dataclass
 │   ├── market_feed.py        # WebSocket daemon for real-time data
@@ -121,6 +124,18 @@ from poly.storage import (
     BigtableWriter,         # Google Cloud Bigtable
     get_db_writer,          # Factory function
     DBWriter,               # Protocol for type hints
+)
+```
+
+### `poly.strategies` - Trading Strategies
+```python
+from poly.strategies import (
+    OCOLimitStrategy,       # One-Cancels-Other limit order strategy
+    OCOConfig,              # Strategy configuration
+    OCOState,               # State machine states (INIT, WAIT, DONE)
+    OCOResult,              # Terminal result with winner info
+    OrderUpdateEvent,       # Event for on_order_update()
+    WinnerSide,             # UP, DOWN, or NONE
 )
 ```
 
@@ -368,6 +383,75 @@ await bot.run()
 - Bigtable fetch: ~65-70ms per cycle
 - Decision function: <1ms
 - Total cycle: ~70ms
+
+### `strategies/oco_limit.py` - OCO Limit Order Strategy
+Client-side One-Cancels-Other (OCO) limit order strategy. Polymarket does NOT support OCO natively.
+
+**Concept:**
+- Fetches current market for specified asset/horizon automatically
+- Places TWO limit BUY orders at threshold price (default 0.8):
+  - UP order fills when UP probability >= 80%
+  - DOWN order fills when DOWN probability >= 80% (UP <= 20%)
+- When either order's trade reaches MINED status, cancels the other
+- Acts as implicit triggers based on market movement
+
+**Why MINED (not MATCHED)?**
+- `MATCHED` (Order): Matched in orderbook, but trade not yet on-chain (could fail)
+- `MINED` (Trade): Trade observed ON-CHAIN - point of no return
+- Trigger OCO on MINED to guarantee the winning side committed
+
+**State Machine:**
+```
+INIT ──[fetch market, place orders]──> WAIT
+                                         │
+       ┌─────────────────────────────────┴─────────────────────────────────┐
+       │                                                                   │
+[UP MINED]                                                           [DOWN MINED]
+       │                                                                   │
+       v                                                                   v
+  cancel DOWN                                                         cancel UP
+       │                                                                   │
+       └─────────────────────────────────┬─────────────────────────────────┘
+                                         │
+                                         v
+                                       DONE
+```
+
+**Usage:**
+```python
+from poly import PolymarketAPI, PolymarketConfig, Asset, MarketHorizon
+from poly.strategies import OCOLimitStrategy, OCOConfig, OrderUpdateEvent
+
+config = OCOConfig(
+    asset=Asset.BTC,           # BTC or ETH
+    horizon=MarketHorizon.M15, # M15, H1, H4, or D1
+    size=100.0,                # Size in shares
+    threshold=0.8,             # Limit price for both (default: 0.8)
+    dry_run=False,             # Set True for simulation
+)
+
+async with PolymarketAPI(PolymarketConfig.load()) as api:
+    strategy = OCOLimitStrategy(config, api)
+    await strategy.start()
+
+    # Feed order updates
+    while not strategy.is_done:
+        event = await get_next_order_event()  # Your implementation
+        await strategy.on_order_update(event)
+
+    result = strategy.result
+    print(f"Winner: {result.winner}, Market: {result.market_slug}")
+```
+
+**OCOResult fields:**
+- `winner`: WinnerSide (UP, DOWN, or NONE)
+- `winning_order_id`: Order ID that was MINED first
+- `winning_trade_id`: Trade ID that triggered the win
+- `losing_order_id`: Order ID that was cancelled
+- `cancel_success`: Whether cancellation succeeded
+- `market_slug`: The market that was traded
+- `up_token_id`, `down_token_id`: Token IDs used
+- `anomaly`: Description if both MINED (race condition)
 
 ### `project_config.py` - Centralized Config
 Single config file (`config/poly.json`) for all project scripts.

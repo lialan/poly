@@ -31,13 +31,18 @@ METRICS REPORTED:
 
     1. P(success) - Probability that hitting the threshold leads to correct outcome
 
-    2. Log(price) delta - BTC price change from market start to threshold hit
-       Helps identify if price momentum correlates with prediction accuracy
+    2. BTC log return at threshold hit - log(price_at_threshold / price_at_market_open)
+       The log return of BTC price from when the market opened to when the threshold
+       was first reached. Positive = BTC went up, Negative = BTC went down.
+       Shown for ALL markets, CORRECT predictions, and FAILED predictions separately.
+       Helps identify if price momentum correlates with prediction accuracy.
 
     3. Time to threshold - How long from market start until threshold was hit
        - Delta time: Time spent in "approach zone" (threshold ±5%) before hitting
-       - Distribution: Bucketed by time (0-3min, 3-6min, etc.) with success rates
-       - Avg depth: Average orderbook depth at threshold hit per time bucket
+       - Distribution: Bucketed by time (0-3min, 3-6min, etc.) with:
+         * Success rate: P(correct) for markets hitting threshold in that window
+         * Avg depth: Average orderbook depth at threshold hit
+         * Avg log ret: Average BTC log return from open when threshold hit
 
 USAGE:
     python scripts/query_btc_15m_extremes.py           # Default: 10% threshold
@@ -247,12 +252,13 @@ def calc_stats(values: list[float]) -> tuple[float, float, float, float]:
 
 
 def print_price_delta(label: str, analyses: list[MarketAnalysis]) -> None:
-    """Print log price delta statistics."""
+    """Print log price return statistics."""
     deltas = [a.log_price_delta for a in analyses if a.log_price_delta is not None]
     if not deltas:
         return
     mn, mx, mean, median = calc_stats(deltas)
-    print(f"\n  Log(price) delta when threshold hit ({label}):")
+    print(f"\n  BTC log return at threshold hit ({label}):")
+    print(f"    (log(price_at_threshold / price_at_market_open))")
     print(f"    Count:  {len(deltas)}")
     print(f"    Min:    {mn*100:+.4f}%")
     print(f"    Max:    {mx*100:+.4f}%")
@@ -289,6 +295,7 @@ def print_time_analysis(
     buckets_correct = [0] * 5
     buckets_total = [0] * 5
     buckets_depth: list[list[float]] = [[] for _ in range(5)]
+    buckets_log_return: list[list[float]] = [[] for _ in range(5)]  # Log price returns per bucket
 
     for a in correct:
         if a.time_to_threshold is not None:
@@ -301,14 +308,17 @@ def print_time_analysis(
         if a.time_to_threshold is not None:
             idx = min(int(a.time_to_threshold // 180), 4)
             buckets_total[idx] += 1
+            if a.log_price_delta is not None:
+                buckets_log_return[idx].append(a.log_price_delta)
 
-    print(f"    Distribution (with success rate and avg depth):")
+    print(f"    Distribution (with success rate, avg depth, avg log return):")
     labels = ["0-3min", "3-6min", "6-9min", "9-12min", "12-15min"]
     for i, label in enumerate(labels):
         pct = buckets_correct[i] / len(times_correct) * 100 if times_correct else 0
         success_rate = buckets_correct[i] / buckets_total[i] * 100 if buckets_total[i] > 0 else 0
         avg_depth = sum(buckets_depth[i]) / len(buckets_depth[i]) if buckets_depth[i] else 0
-        print(f"      {label:8s} {buckets_correct[i]:3d} ({pct:5.1f}%) | P(success): {success_rate:5.1f}% ({buckets_correct[i]}/{buckets_total[i]}) | Avg depth: {avg_depth:,.0f}")
+        avg_log_ret = sum(buckets_log_return[i]) / len(buckets_log_return[i]) * 100 if buckets_log_return[i] else 0
+        print(f"      {label:8s} {buckets_correct[i]:3d} ({pct:5.1f}%) | P(success): {success_rate:5.1f}% ({buckets_correct[i]}/{buckets_total[i]}) | Avg depth: {avg_depth:>6,.0f} | Avg log ret: {avg_log_ret:+.4f}%")
 
 
 def print_question_analysis(
@@ -332,6 +342,9 @@ def print_question_analysis(
         prob = len(correct) / resolved * 100
         print(f"\n  {prob_label} = {prob:.1f}%")
         print(f"  (Based on {resolved} resolved markets)")
+
+    # Overall log price return for all markets hitting this threshold
+    print_price_delta("ALL", hit_first)
 
     print_price_delta("CORRECT", correct)
 

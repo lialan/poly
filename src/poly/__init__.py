@@ -96,6 +96,20 @@ except ImportError:
     escape_markdown = None
 
 # ============================================================================
+# Re-exports from strategies/ submodule
+# ============================================================================
+
+from .strategies.oco_limit import (
+    OCOLimitStrategy,
+    OCOConfig,
+    OCOState,
+    OCOResult,
+    OrderUpdateEvent,
+    WinnerSide,
+    create_order_update_from_polling,
+)
+
+# ============================================================================
 # Re-exports from api/ submodule (for backward compatibility)
 # ============================================================================
 
@@ -323,4 +337,12 @@ __all__ = [
     "BigtableConfig",
     "get_db_writer",
     "DBWriter",
+    # Strategies
+    "OCOLimitStrategy",
+    "OCOConfig",
+    "OCOState",
+    "OCOResult",
+    "OrderUpdateEvent",
+    "WinnerSide",
+    "create_order_update_from_polling",
 ]

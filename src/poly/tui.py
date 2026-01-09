@@ -100,6 +100,29 @@ SCRIPT_OPTIONS = {
     --asset btc|eth         Asset to trade (default: btc)
     --interval N            Decision interval seconds (default: 3)""",
 
+    "run_oco_trading.py": """
+  Extreme threshold trading - continuous loop betting
+
+  Monitors prices and bets when market shows conviction.
+  Triggers at threshold-0.01 (e.g., 79% for 80% threshold).
+  Runs continuously until insufficient funds or Ctrl+C.
+
+  Options:
+    --bet N                 Bet amount in USD (default: 5)
+    --asset btc|eth         Asset to trade (default: btc)
+    --horizon 15m|1h|4h|d1  Market horizon (default: 15m)
+    --threshold N           Trigger threshold 0.5-0.95 (default: 0.8)
+    --no-wait               Exit after order (don't wait for resolution)
+    --once                  Single epoch only (don't loop)
+    -n, --dry-run           Simulate without real orders
+
+  Examples:
+    (no args)               Interactive setup, continuous loop
+    --bet 10                $10 bet, continuous loop
+    --bet 5 --once          $5 bet, single epoch
+    --asset eth             Trade ETH instead of BTC
+    -n --once               Dry run, single epoch""",
+
     "trade_dry_run.py": """
   Options:
     --live                  Place real test order (canceled immediately)""",
