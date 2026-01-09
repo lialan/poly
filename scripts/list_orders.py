@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-List and Cancel Open Orders
-============================
+Manage Orders and Positions
+===========================
 
-Lists all open orders on Polymarket and allows cancellation.
+Lists open orders and positions on Polymarket. Allows cancelling orders
+and selling positions.
 
 Usage:
-    python scripts/list_orders.py                 # List all open orders
-    python scripts/list_orders.py -c              # List and prompt to cancel
+    python scripts/list_orders.py                 # List open orders
+    python scripts/list_orders.py -p              # List positions (shares held)
+    python scripts/list_orders.py -c              # List orders and cancel interactively
+    python scripts/list_orders.py -s              # List positions and sell interactively
     python scripts/list_orders.py -x ORDER_ID     # Cancel specific order by ID/hash
 
 Requirements:
@@ -21,7 +24,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, "src")
 
-from poly import PolymarketAPI, PolymarketConfig
+from poly import PolymarketAPI, PolymarketConfig, OrderSide
 from poly.api.signer import LocalSigner
 
 
@@ -99,6 +102,156 @@ async def cancel_order_by_id(api: PolymarketAPI, order_id: str) -> bool:
     except Exception as e:
         print(f"    [ERROR] Failed to cancel: {e}")
         return False
+
+
+def format_position(pos, index: int) -> str:
+    """Format a position for display.
+
+    Args:
+        pos: MarketPosition object
+        index: Display index (1-based)
+
+    Returns:
+        Formatted string for display
+    """
+    # Format end date
+    end_str = "N/A"
+    if pos.end_date:
+        end_str = pos.end_date.strftime("%Y-%m-%d %H:%M")
+
+    pnl_sign = "+" if pos.cash_pnl >= 0 else ""
+
+    lines = [
+        f"[{index}] {pos.title[:50]}..." if len(pos.title) > 50 else f"[{index}] {pos.title}",
+        f"    Outcome: {pos.outcome}  Shares: {pos.size:.2f}  Avg Price: {pos.avg_price:.4f}",
+        f"    Current: {pos.current_price:.4f}  Value: ${pos.current_value:.2f}  PnL: {pnl_sign}${pos.cash_pnl:.2f} ({pnl_sign}{pos.percent_pnl:.1f}%)",
+        f"    Ends: {end_str}  Slug: {pos.slug[:30]}..." if len(pos.slug) > 30 else f"    Ends: {end_str}  Slug: {pos.slug}",
+    ]
+    return "\n".join(lines)
+
+
+async def get_orderbook_price(api: PolymarketAPI, token_id: str, side: str) -> float:
+    """Get best bid or ask price from orderbook.
+
+    Args:
+        api: Polymarket API client
+        token_id: Token ID to query
+        side: "bid" or "ask"
+
+    Returns:
+        Best price (0 if no orders)
+    """
+    try:
+        orderbook = await api.get_orderbook(token_id)
+        if side == "bid":
+            bids = orderbook.get("bids", [])
+            if bids:
+                return max(float(b["price"]) for b in bids)
+        else:
+            asks = orderbook.get("asks", [])
+            if asks:
+                return min(float(a["price"]) for a in asks)
+    except Exception:
+        pass
+    return 0.0
+
+
+async def sell_position(api: PolymarketAPI, pos, price: float = None) -> bool:
+    """Sell all shares of a position.
+
+    Args:
+        api: Polymarket API client
+        pos: MarketPosition object
+        price: Limit price (None = use best bid)
+
+    Returns:
+        True if order placed successfully
+    """
+    try:
+        # Get best bid if no price specified
+        if price is None:
+            price = await get_orderbook_price(api, pos.asset, "bid")
+            if price <= 0:
+                print(f"    [ERROR] No bids available for {pos.outcome}")
+                return False
+            print(f"    Using best bid: {price:.4f}")
+
+        # Place sell order
+        result = await api.place_order(
+            token_id=pos.asset,
+            side=OrderSide.SELL,
+            price=price,
+            size=pos.size,
+        )
+
+        if result.success:
+            print(f"    [OK] Sell order placed: {result.order_id}")
+            return True
+        else:
+            print(f"    [ERROR] {result.error_message}")
+            return False
+
+    except Exception as e:
+        print(f"    [ERROR] Failed to sell: {e}")
+        return False
+
+
+async def interactive_sell(api: PolymarketAPI, positions: list) -> int:
+    """Interactive mode to sell positions.
+
+    Args:
+        api: Polymarket API client
+        positions: List of MarketPosition objects
+
+    Returns:
+        Number of positions sold
+    """
+    if not positions:
+        print("\nNo positions to sell.")
+        return 0
+
+    print("\nEnter position number to sell (or 'q' to quit, 'a' to sell all at best bid):")
+
+    sold = 0
+    while True:
+        try:
+            choice = input("> ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.")
+            break
+
+        if choice == "q" or choice == "":
+            break
+
+        if choice == "a":
+            print("\nSelling all positions at best bid...")
+            for pos in positions:
+                print(f"  Selling {pos.size:.2f} {pos.outcome} shares of {pos.title[:30]}...")
+                if await sell_position(api, pos):
+                    sold += 1
+            break
+
+        try:
+            idx = int(choice)
+            if 1 <= idx <= len(positions):
+                pos = positions[idx - 1]
+                print(f"  Selling {pos.size:.2f} {pos.outcome} shares...")
+                if await sell_position(api, pos):
+                    sold += 1
+                    positions.pop(idx - 1)
+                    if not positions:
+                        print("\nAll positions sold.")
+                        break
+                    print("\nRemaining positions:")
+                    for i, p in enumerate(positions, 1):
+                        print(format_position(p, i))
+                    print("\nEnter position number to sell (or 'q' to quit):")
+            else:
+                print(f"Invalid selection. Enter 1-{len(positions)}, 'a' for all, or 'q' to quit.")
+        except ValueError:
+            print("Invalid input. Enter a number, 'a' for all, or 'q' to quit.")
+
+    return sold
 
 
 async def interactive_cancel(api: PolymarketAPI, orders: list[dict]) -> int:
@@ -179,8 +332,12 @@ async def main_async(args: argparse.Namespace) -> int:
     Returns:
         Exit code (0 for success)
     """
+    # Determine mode
+    show_positions = args.positions or args.sell
+    title = "POLYMARKET POSITIONS" if show_positions else "POLYMARKET OPEN ORDERS"
+
     print("=" * 60)
-    print("POLYMARKET OPEN ORDERS")
+    print(title)
     print(f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     print("=" * 60)
 
@@ -193,14 +350,15 @@ async def main_async(args: argparse.Namespace) -> int:
         print(f"    [ERROR] Failed to load config: {e}")
         return 1
 
+    if not config.has_trading_credentials:
+        print("    [ERROR] No trading credentials configured")
+        print("    Set POLYMARKET_PRIVATE_KEY environment variable")
+        return 1
+
     # Cancel specific order by ID if provided
     if args.cancel_id:
         order_id = args.cancel_id
         print(f"\n[2] Cancelling order: {order_id}")
-
-        if not config.has_trading_credentials:
-            print("    [ERROR] No trading credentials configured")
-            return 1
 
         api = PolymarketAPI(config)
         try:
@@ -212,13 +370,44 @@ async def main_async(args: argparse.Namespace) -> int:
         finally:
             await api.close()
 
-    # Fetch open orders
-    print("\n[2] Fetching open orders...")
+    # Show positions mode
+    if show_positions:
+        print("\n[2] Fetching positions...")
+        api = PolymarketAPI(config)
+        try:
+            positions = await api.get_positions(size_threshold=0.01)
+            print(f"    Found {len(positions)} position(s)")
 
-    if not config.has_trading_credentials:
-        print("    [ERROR] No trading credentials configured")
-        print("    Set POLYMARKET_PRIVATE_KEY environment variable")
-        return 1
+            if not positions:
+                print("\n    No positions.")
+                return 0
+
+            # Display positions
+            print("\n" + "=" * 60)
+            print("POSITIONS")
+            print("=" * 60)
+            for i, pos in enumerate(positions, 1):
+                print()
+                print(format_position(pos, i))
+
+            total_value = sum(p.current_value for p in positions)
+            total_pnl = sum(p.cash_pnl for p in positions)
+            pnl_sign = "+" if total_pnl >= 0 else ""
+            print()
+            print(f"Total: {len(positions)} position(s)  Value: ${total_value:.2f}  PnL: {pnl_sign}${total_pnl:.2f}")
+
+            # Interactive sell mode
+            if args.sell:
+                sold = await interactive_sell(api, list(positions))
+                print(f"\nPlaced {sold} sell order(s)")
+
+        finally:
+            await api.close()
+
+        return 0
+
+    # Show orders mode (default)
+    print("\n[2] Fetching open orders...")
 
     try:
         orders = get_open_orders(config)
@@ -244,11 +433,6 @@ async def main_async(args: argparse.Namespace) -> int:
 
     # Interactive cancel mode
     if args.cancel:
-        if not config.has_trading_credentials:
-            print("\n[ERROR] No trading credentials - cannot cancel orders")
-            print("Set POLYMARKET_PRIVATE_KEY environment variable")
-            return 1
-
         api = PolymarketAPI(config)
         try:
             cancelled = await interactive_cancel(api, orders)
@@ -261,11 +445,11 @@ async def main_async(args: argparse.Namespace) -> int:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="List and cancel open orders on Polymarket",
+        description="Manage orders and positions on Polymarket",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # List all open orders
+    # List all open orders (default)
     python scripts/list_orders.py
 
     # List orders and prompt to cancel
@@ -273,6 +457,12 @@ Examples:
 
     # Cancel a specific order by ID/hash
     python scripts/list_orders.py -x ORDER_ID_HERE
+
+    # List current positions (shares held)
+    python scripts/list_orders.py -p
+
+    # List positions and prompt to sell
+    python scripts/list_orders.py -s
         """,
     )
 
@@ -287,6 +477,18 @@ Examples:
         type=str,
         metavar="ORDER_ID",
         help="Cancel a specific order by ID/hash",
+    )
+
+    parser.add_argument(
+        "-p", "--positions",
+        action="store_true",
+        help="Show current positions (shares held) instead of orders",
+    )
+
+    parser.add_argument(
+        "-s", "--sell",
+        action="store_true",
+        help="Interactive sell mode: list positions then prompt to sell",
     )
 
     args = parser.parse_args()

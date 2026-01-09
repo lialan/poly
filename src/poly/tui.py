@@ -148,12 +148,16 @@ SCRIPT_OPTIONS = {
 
     "list_orders.py": """
   Options:
-    -c, --cancel            Interactive cancel mode
+    -c, --cancel            Interactive cancel mode (orders)
     -x, --cancel-id ID      Cancel specific order by ID/hash
+    -p, --positions         Show positions (shares held)
+    -s, --sell              Interactive sell mode (positions)
 
   Examples:
     (no args)               List all open orders
-    -c                      List and prompt to cancel
+    -c                      List orders, prompt to cancel
+    -p                      List positions (shares held)
+    -s                      List positions, prompt to sell
     -x 0xabc123...          Cancel order by ID/hash""",
 
     "generate_rolling_klines.py": """
