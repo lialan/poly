@@ -6,9 +6,9 @@ List and Cancel Open Orders
 Lists all open orders on Polymarket and allows cancellation.
 
 Usage:
-    python scripts/list_orders.py              # List all open orders
-    python scripts/list_orders.py -c           # List and prompt to cancel
-    python scripts/list_orders.py -c ORDER_ID  # Cancel specific order
+    python scripts/list_orders.py                 # List all open orders
+    python scripts/list_orders.py -c              # List and prompt to cancel
+    python scripts/list_orders.py -x ORDER_ID     # Cancel specific order by ID/hash
 
 Requirements:
     - POLYMARKET_WALLET_ADDRESS and POLYMARKET_PRIVATE_KEY must be set
@@ -193,9 +193,9 @@ async def main_async(args: argparse.Namespace) -> int:
         print(f"    [ERROR] Failed to load config: {e}")
         return 1
 
-    # Cancel specific order if provided
-    if args.cancel and args.cancel != True:  # noqa: E712
-        order_id = args.cancel
+    # Cancel specific order by ID if provided
+    if args.cancel_id:
+        order_id = args.cancel_id
         print(f"\n[2] Cancelling order: {order_id}")
 
         if not config.has_trading_credentials:
@@ -271,17 +271,22 @@ Examples:
     # List orders and prompt to cancel
     python scripts/list_orders.py -c
 
-    # Cancel a specific order by ID
-    python scripts/list_orders.py -c ORDER_ID_HERE
+    # Cancel a specific order by ID/hash
+    python scripts/list_orders.py -x ORDER_ID_HERE
         """,
     )
 
     parser.add_argument(
         "-c", "--cancel",
-        nargs="?",
-        const=True,
-        default=False,
-        help="Cancel mode: no arg = interactive, with ORDER_ID = cancel specific order",
+        action="store_true",
+        help="Interactive cancel mode: list orders then prompt to cancel",
+    )
+
+    parser.add_argument(
+        "-x", "--cancel-id",
+        type=str,
+        metavar="ORDER_ID",
+        help="Cancel a specific order by ID/hash",
     )
 
     args = parser.parse_args()

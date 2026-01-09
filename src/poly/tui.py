@@ -149,12 +149,12 @@ SCRIPT_OPTIONS = {
     "list_orders.py": """
   Options:
     -c, --cancel            Interactive cancel mode
-    -c ORDER_ID             Cancel specific order by ID
+    -x, --cancel-id ID      Cancel specific order by ID/hash
 
   Examples:
     (no args)               List all open orders
     -c                      List and prompt to cancel
-    -c abc123...            Cancel specific order""",
+    -x 0xabc123...          Cancel order by ID/hash""",
 
     "generate_rolling_klines.py": """
   Options:
