@@ -643,18 +643,30 @@ class PolymarketAPI:
     """Client for Polymarket APIs.
 
     Provides methods to query positions, markets, and account data.
-    Also supports order placement via CLOB client (requires private_key in config).
+    Also supports order placement via CLOB client (requires private_key or KMS in config).
+
+    Trading credentials can be provided via:
+    - Local private key (py-clob-client)
+    - Google Cloud KMS key path
+    - Custom Signer implementation
     """
 
-    def __init__(self, config: Optional[PolymarketConfig] = None):
+    def __init__(
+        self,
+        config: Optional[PolymarketConfig] = None,
+        signer: Optional["Signer"] = None,
+    ):
         """Initialize the API client.
 
         Args:
             config: Polymarket configuration. If None, loads from default location.
+            signer: Optional custom Signer. If None, created from config when needed.
         """
         self.config = config or PolymarketConfig.load()
         self._session: Optional[aiohttp.ClientSession] = None
-        # Lazy-initialized CLOB client for trading
+        # Lazy-initialized signer for trading
+        self._signer = signer
+        # Legacy: keep _clob_client for backward compatibility
         self._clob_client = None
         self._api_creds = None  # Cached API credentials
 
@@ -689,24 +701,44 @@ class PolymarketAPI:
         await self.close()
 
     # =========================================================================
-    # Trading Setup (CLOB Client)
+    # Trading Setup (Signer Interface)
     # =========================================================================
 
     def _ensure_trading_configured(self) -> None:
         """Ensure trading credentials are available.
 
         Raises:
-            TradingNotConfiguredError: If private_key is not configured
+            TradingNotConfiguredError: If no trading credentials configured
         """
-        if not self.config.private_key:
+        if not self.config.has_trading_credentials:
             raise TradingNotConfiguredError(
-                "Trading requires private_key in config. "
-                "Set POLYMARKET_PRIVATE_KEY environment variable or "
-                "add private_key to config/polymarket.json"
+                "Trading requires credentials in config. "
+                "Set POLYMARKET_PRIVATE_KEY (for local signing) or "
+                "POLYMARKET_KMS_KEY_PATH (for KMS signing) environment variable, "
+                "or add to config/polymarket.json"
             )
+
+    def _get_signer(self) -> "Signer":
+        """Get or create the Signer for trading.
+
+        Returns:
+            Signer instance (LocalSigner, KMSSigner, or custom)
+
+        Raises:
+            TradingNotConfiguredError: If credentials not configured
+            ImportError: If required packages not installed
+        """
+        self._ensure_trading_configured()
+
+        if self._signer is None:
+            self._signer = self.config.get_signer()
+
+        return self._signer
 
     def _get_clob_client(self) -> Any:
         """Get or create the CLOB client for trading (sync).
+
+        For backward compatibility. Uses LocalSigner internally.
 
         Returns:
             ClobClient instance (from py-clob-client package)
@@ -715,9 +747,23 @@ class PolymarketAPI:
             TradingNotConfiguredError: If credentials not configured
             ImportError: If py-clob-client not installed
         """
-        self._ensure_trading_configured()
+        from poly.signer import LocalSigner
 
+        signer = self._get_signer()
+
+        # For LocalSigner, return the internal CLOB client
+        if isinstance(signer, LocalSigner):
+            return signer._get_clob_client()
+
+        # For other signers, we need to create a CLOB client for API calls
+        # but use the signer for signing
         if self._clob_client is None:
+            if not self.config.private_key:
+                raise TradingNotConfiguredError(
+                    "Direct CLOB client access requires private_key. "
+                    "Use the Signer interface for KMS-based signing."
+                )
+
             try:
                 from py_clob_client.client import ClobClient
             except ImportError:
@@ -726,7 +772,6 @@ class PolymarketAPI:
                     "Install with: pip install py-clob-client"
                 )
 
-            # Create client without creds first (for derivation)
             self._clob_client = ClobClient(
                 host=self.config.clob_api_url,
                 key=self.config.private_key,
@@ -735,12 +780,19 @@ class PolymarketAPI:
                 funder=self.config.proxy_wallet,
             )
 
-            # Derive and set API credentials
             if self._api_creds is None:
                 self._api_creds = self._clob_client.create_or_derive_api_creds()
             self._clob_client.set_api_creds(self._api_creds)
 
         return self._clob_client
+
+    @property
+    def signer(self) -> "Signer":
+        """Get the signer instance.
+
+        Useful for advanced use cases where direct signer access is needed.
+        """
+        return self._get_signer()
 
     # =========================================================================
     # Position Queries (Data API)
@@ -1473,27 +1525,65 @@ class PolymarketAPI:
     ) -> str:
         """Synchronous order placement (runs in executor).
 
+        Uses the Signer interface for signing. For LocalSigner, this delegates
+        to py-clob-client. For KMSSigner, uses custom EIP-712 signing.
+
         Returns:
             order_id from CLOB response
 
         Raises:
             TradingError: If order placement fails
         """
-        from py_clob_client.order_builder.constants import BUY, SELL
+        from poly.signer import LocalSigner, KMSSigner, OrderParams
+        from poly.signer import OrderSide as SignerOrderSide
 
-        client = self._get_clob_client()
+        signer = self._get_signer()
 
-        # Map side to py-clob-client constant
-        clob_side = BUY if side == OrderSide.BUY else SELL
+        # Map OrderSide enum
+        signer_side = SignerOrderSide.BUY if side == OrderSide.BUY else SignerOrderSide.SELL
 
-        # Create and post order
-        order = client.create_order(
-            token_id=token_id,
-            price=price,
-            size=size,
-            side=clob_side,
-        )
-        response = client.post_order(order)
+        if isinstance(signer, LocalSigner):
+            # Use LocalSigner's built-in post_order (wraps py-clob-client)
+            params = OrderParams(
+                token_id=token_id,
+                side=signer_side,
+                price=price,
+                size=size,
+            )
+            signed_order = signer.sign_order(params)
+            response = signer.post_order(signed_order)
+
+        elif isinstance(signer, KMSSigner):
+            # Use KMSSigner for signing, then submit via HTTP
+            params = OrderParams(
+                token_id=token_id,
+                side=signer_side,
+                price=price,
+                size=size,
+            )
+            signed_order = signer.sign_order(params)
+
+            # Submit order via REST API
+            import requests
+            url = f"{self.config.clob_api_url}/order"
+            response = requests.post(url, json=signed_order)
+            response.raise_for_status()
+            response = response.json()
+
+        else:
+            # Generic fallback: try to use CLOB client
+            from py_clob_client.order_builder.constants import BUY, SELL
+
+            client = self._get_clob_client()
+            clob_side = BUY if side == OrderSide.BUY else SELL
+
+            order = client.create_order(
+                token_id=token_id,
+                price=price,
+                size=size,
+                side=clob_side,
+            )
+            response = client.post_order(order)
 
         # Extract order ID from response
         order_id = response.get("orderID") or response.get("order_id")
@@ -1560,8 +1650,17 @@ class PolymarketAPI:
 
     def _cancel_order_sync(self, order_id: str) -> bool:
         """Synchronous order cancellation (runs in executor)."""
-        client = self._get_clob_client()
-        client.cancel(order_id)
+        from poly.signer import LocalSigner
+
+        signer = self._get_signer()
+
+        if isinstance(signer, LocalSigner):
+            signer.cancel_order(order_id)
+        else:
+            # For KMS signer, use direct CLOB client (cancel doesn't need signing)
+            client = self._get_clob_client()
+            client.cancel(order_id)
+
         return True
 
     # =========================================================================
@@ -1590,8 +1689,17 @@ class PolymarketAPI:
 
     def _get_order_sync(self, order_id: str) -> OrderInfo:
         """Synchronous order status query (runs in executor)."""
-        client = self._get_clob_client()
-        response = client.get_order(order_id)
+        from poly.signer import LocalSigner
+
+        signer = self._get_signer()
+
+        if isinstance(signer, LocalSigner):
+            response = signer.get_order(order_id)
+        else:
+            # For other signers, use direct CLOB client
+            client = self._get_clob_client()
+            response = client.get_order(order_id)
+
         return OrderInfo.from_api_response(response)
 
     # =========================================================================

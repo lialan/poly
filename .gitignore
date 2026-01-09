@@ -76,3 +76,4 @@ poly_data.db
 config/
 !config/*.example.json
 *.secrets.json
+config/polymarket.json

@@ -62,7 +62,17 @@ from .binance_ws import (
     collect_klines,
     parse_kline_message,
 )
-from .polymarket_config import PolymarketConfig, SecretManager
+from .polymarket_config import PolymarketConfig, SecretManager, SignerType
+from .signer import (
+    Signer,
+    LocalSigner,
+    KMSSigner,
+    EOASigner,
+    OrderParams,
+    SignedOrder,
+    SignerType as SignerTypeEnum,
+    create_signer,
+)
 from .polymarket_api import (
     PolymarketAPI,
     PolymarketAPISync,
@@ -188,6 +198,14 @@ __all__ = [
     "parse_kline_message",
     "PolymarketConfig",
     "SecretManager",
+    "SignerType",
+    "Signer",
+    "LocalSigner",
+    "KMSSigner",
+    "EOASigner",
+    "OrderParams",
+    "SignedOrder",
+    "create_signer",
     "PolymarketAPI",
     "PolymarketAPISync",
     "MarketPosition",

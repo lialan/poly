@@ -24,6 +24,7 @@ poly/
 │   ├── polymarket_api.py     # Async/sync API client (positions, trades)
 │   ├── polymarket_config.py  # Config with Secret Manager support
 │   ├── polymarket_ws.py      # Low-level WebSocket client
+│   ├── signer.py             # Order signing (local key / Google KMS)
 │   ├── binance_price.py      # Binance price data (REST)
 │   ├── bigtable_writer.py    # Google Cloud Bigtable storage
 │   ├── sqlite_writer.py      # SQLite database storage
@@ -137,7 +138,76 @@ Configuration with Google Secret Manager support and env var fallback.
 
 **Env vars:**
 - `POLYMARKET_WALLET_ADDRESS`
-- `POLYMARKET_PRIVATE_KEY` (optional, for trading)
+- `POLYMARKET_PRIVATE_KEY` (optional, for local signing)
+- `POLYMARKET_SIGNER_TYPE` (optional: `local`, `kms`, or `eoa`)
+- `POLYMARKET_KMS_KEY_PATH` (optional, for KMS signing)
+
+### `signer.py` - Order Signing Interface
+Pluggable signing implementations for Polymarket CLOB orders.
+
+**Signer Types:**
+| Type | Class | Description |
+|------|-------|-------------|
+| `local` | `LocalSigner` | Uses py-clob-client with local private key (default) |
+| `kms` | `KMSSigner` | Uses Google Cloud KMS for signing |
+| `eoa` | `EOASigner` | Uses eth_account directly (experimental) |
+
+**Usage (Local signing):**
+```python
+from poly import LocalSigner, OrderParams, OrderSide
+
+signer = LocalSigner(private_key="0x...")
+params = OrderParams(
+    token_id="0x...",
+    side=OrderSide.BUY,
+    price=0.45,
+    size=100.0,
+)
+signed_order = signer.sign_order(params)
+response = signer.post_order(signed_order)
+```
+
+**Usage (KMS signing):**
+```python
+from poly import KMSSigner, OrderParams, OrderSide
+
+signer = KMSSigner(
+    key_path="projects/my-project/locations/us/keyRings/my-ring/cryptoKeys/my-key/cryptoKeyVersions/1",
+    wallet_address="0x...",  # Address derived from KMS key
+)
+params = OrderParams(
+    token_id="0x...",
+    side=OrderSide.BUY,
+    price=0.45,
+    size=100.0,
+)
+signed_order = signer.sign_order(params)
+# Submit via REST API
+```
+
+**Usage (via PolymarketAPI):**
+```python
+from poly import PolymarketAPI, PolymarketConfig, SignerType
+
+# Config with KMS
+config = PolymarketConfig(
+    wallet_address="0x...",
+    signer_type=SignerType.KMS,
+    kms_key_path="projects/my-project/locations/.../cryptoKeyVersions/1",
+)
+
+async with PolymarketAPI(config) as api:
+    result = await api.place_order(
+        token_id="0x...",
+        side=OrderSide.BUY,
+        price=0.45,
+        size=100.0,
+    )
+```
+
+**KMS Key Requirements:**
+- Algorithm: `EC_SIGN_SECP256K1_SHA256`
+- The wallet_address must be derived from the KMS public key
 
 ### `market_feed.py` - Real-time Data Feed
 Daemon-like service for streaming market data via WebSocket. **One connection monitors multiple markets.**

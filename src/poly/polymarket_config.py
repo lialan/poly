@@ -105,6 +105,13 @@ class SecretManager:
             return False
 
 
+class SignerType:
+    """Type of signer to use for trading."""
+    LOCAL = "local"   # py-clob-client with local private key
+    KMS = "kms"       # Google Cloud KMS
+    EOA = "eoa"       # eth_account with local key (no py-clob-client)
+
+
 @dataclass
 class PolymarketConfig:
     """Configuration for Polymarket API interactions.
@@ -118,6 +125,8 @@ class PolymarketConfig:
         clob_api_url: CLOB API base URL
         data_api_url: Data API base URL
         gamma_api_url: Gamma API base URL
+        signer_type: Type of signer to use (local, kms, or eoa)
+        kms_key_path: Full KMS key path (for KMS signer)
     """
 
     wallet_address: str
@@ -129,10 +138,15 @@ class PolymarketConfig:
     data_api_url: str = "https://data-api.polymarket.com"
     gamma_api_url: str = "https://gamma-api.polymarket.com"
 
+    # Signer configuration
+    signer_type: str = SignerType.LOCAL
+    kms_key_path: Optional[str] = None
+
     # Secret Manager settings (class-level defaults)
     SECRET_WALLET_ADDRESS = "polymarket-wallet-address"
     SECRET_PRIVATE_KEY = "polymarket-private-key"
     SECRET_PROXY_WALLET = "polymarket-proxy-wallet"
+    SECRET_KMS_KEY_PATH = "polymarket-kms-key-path"
 
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -208,9 +222,20 @@ class PolymarketConfig:
             env_fallback="POLYMARKET_PROXY_WALLET" if use_env_fallback else None,
         )
 
+        kms_key_path = sm.get_secret(
+            cls.SECRET_KMS_KEY_PATH,
+            env_fallback="POLYMARKET_KMS_KEY_PATH" if use_env_fallback else None,
+        )
+
         # Get non-secret config from env vars
         chain_id = int(os.environ.get("POLYMARKET_CHAIN_ID", "137"))
         signature_type = int(os.environ.get("POLYMARKET_SIGNATURE_TYPE", "0"))
+
+        # Determine signer type
+        signer_type = os.environ.get("POLYMARKET_SIGNER_TYPE", SignerType.LOCAL)
+        if kms_key_path and signer_type == SignerType.LOCAL:
+            # Auto-detect KMS if key path is provided
+            signer_type = SignerType.KMS
 
         return cls(
             wallet_address=wallet_address,
@@ -218,6 +243,8 @@ class PolymarketConfig:
             proxy_wallet=proxy_wallet,
             chain_id=chain_id,
             signature_type=signature_type,
+            signer_type=signer_type,
+            kms_key_path=kms_key_path,
         )
 
     @classmethod
@@ -241,6 +268,12 @@ class PolymarketConfig:
         with open(config_path) as f:
             data = json.load(f)
 
+        # Determine signer type
+        signer_type = data.get("signer_type", SignerType.LOCAL)
+        kms_key_path = data.get("kms_key_path")
+        if kms_key_path and signer_type == SignerType.LOCAL:
+            signer_type = SignerType.KMS
+
         return cls(
             wallet_address=data.get("wallet_address", ""),
             private_key=data.get("private_key"),
@@ -250,6 +283,8 @@ class PolymarketConfig:
             clob_api_url=data.get("clob_api_url", "https://clob.polymarket.com"),
             data_api_url=data.get("data_api_url", "https://data-api.polymarket.com"),
             gamma_api_url=data.get("gamma_api_url", "https://gamma-api.polymarket.com"),
+            signer_type=signer_type,
+            kms_key_path=kms_key_path,
         )
 
     @classmethod
@@ -262,6 +297,8 @@ class PolymarketConfig:
             POLYMARKET_PROXY_WALLET: Proxy wallet address (optional)
             POLYMARKET_CHAIN_ID: Chain ID (default: 137)
             POLYMARKET_SIGNATURE_TYPE: Signature type (default: 0)
+            POLYMARKET_SIGNER_TYPE: Signer type (local, kms, or eoa)
+            POLYMARKET_KMS_KEY_PATH: Full KMS key path (for KMS signer)
 
         Returns:
             PolymarketConfig instance
@@ -273,12 +310,19 @@ class PolymarketConfig:
         if not wallet_address:
             raise ValueError("POLYMARKET_WALLET_ADDRESS environment variable is required")
 
+        kms_key_path = os.environ.get("POLYMARKET_KMS_KEY_PATH")
+        signer_type = os.environ.get("POLYMARKET_SIGNER_TYPE", SignerType.LOCAL)
+        if kms_key_path and signer_type == SignerType.LOCAL:
+            signer_type = SignerType.KMS
+
         return cls(
             wallet_address=wallet_address,
             private_key=os.environ.get("POLYMARKET_PRIVATE_KEY"),
             proxy_wallet=os.environ.get("POLYMARKET_PROXY_WALLET"),
             chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
             signature_type=int(os.environ.get("POLYMARKET_SIGNATURE_TYPE", "0")),
+            signer_type=signer_type,
+            kms_key_path=kms_key_path,
         )
 
     @classmethod
@@ -334,8 +378,66 @@ class PolymarketConfig:
 
     @property
     def has_trading_credentials(self) -> bool:
-        """Check if trading credentials are available."""
-        return self.private_key is not None
+        """Check if trading credentials are available.
+
+        Returns True if either:
+        - private_key is set (for local/EOA signing)
+        - kms_key_path is set (for KMS signing)
+        """
+        return self.private_key is not None or self.kms_key_path is not None
+
+    @property
+    def is_kms_configured(self) -> bool:
+        """Check if KMS signing is configured."""
+        return self.signer_type == SignerType.KMS and self.kms_key_path is not None
+
+    def get_signer(self) -> "Signer":
+        """Create a Signer instance from this config.
+
+        Returns:
+            Appropriate Signer implementation based on signer_type
+
+        Raises:
+            ValueError: If required credentials are missing
+            ImportError: If required packages are not installed
+        """
+        from poly.signer import (
+            Signer,
+            LocalSigner,
+            KMSSigner,
+            EOASigner,
+            SignerType as SignerTypeEnum,
+        )
+
+        if self.signer_type == SignerType.KMS:
+            if not self.kms_key_path:
+                raise ValueError("kms_key_path is required for KMS signer")
+            return KMSSigner(
+                key_path=self.kms_key_path,
+                wallet_address=self.wallet_address,
+                chain_id=self.chain_id,
+                clob_api_url=self.clob_api_url,
+            )
+
+        elif self.signer_type == SignerType.EOA:
+            if not self.private_key:
+                raise ValueError("private_key is required for EOA signer")
+            return EOASigner(
+                private_key=self.private_key,
+                chain_id=self.chain_id,
+                clob_api_url=self.clob_api_url,
+            )
+
+        else:  # LOCAL (default)
+            if not self.private_key:
+                raise ValueError("private_key is required for local signer")
+            return LocalSigner(
+                private_key=self.private_key,
+                chain_id=self.chain_id,
+                clob_api_url=self.clob_api_url,
+                funder=self.proxy_wallet,
+                signature_type=self.signature_type,
+            )
 
     def to_dict(self, include_secrets: bool = False) -> dict:
         """Convert config to dictionary.
@@ -354,10 +456,15 @@ class PolymarketConfig:
             "clob_api_url": self.clob_api_url,
             "data_api_url": self.data_api_url,
             "gamma_api_url": self.gamma_api_url,
+            "signer_type": self.signer_type,
             "has_trading_credentials": self.has_trading_credentials,
+            "is_kms_configured": self.is_kms_configured,
         }
 
-        if include_secrets and self.private_key:
-            result["private_key"] = self.private_key
+        if include_secrets:
+            if self.private_key:
+                result["private_key"] = self.private_key
+            if self.kms_key_path:
+                result["kms_key_path"] = self.kms_key_path
 
         return result

@@ -8,7 +8,10 @@ python-binance>=1.0.20
 # Web3 / Blockchain
 web3>=6.0.0
 eth-account>=0.10.0
+eth-abi>=4.0.0  # For EIP-712 encoding
+eth-keys>=0.4.0  # For signature recovery
 eth-typing>=3.0.0
+eth-utils>=2.0.0  # For keccak hashing
 
 # HTTP / Async
 aiohttp>=3.9.0
@@ -27,6 +30,8 @@ pydantic-settings>=2.0.0
 
 # Google Cloud
 google-cloud-bigtable>=2.21.0
+google-cloud-kms>=2.19.0  # For KMS-based signing
+google-cloud-secret-manager>=2.16.0  # For secret retrieval
 
 # Utilities
 tenacity>=8.2.0
