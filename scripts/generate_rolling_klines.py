@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-Generate rolling 3-minute klines from 1-minute kline data.
+Generate rolling N-minute klines from 1-minute kline data.
 
 ================================================================================
 HOW THIS SCRIPT WORKS
 ================================================================================
 
 CONCEPT:
-    For each 1-minute kline, generate a corresponding 3-minute kline that
-    aggregates the current candle plus the next 2 candles (T, T+1, T+2).
+    For each 1-minute kline, generate a corresponding N-minute kline that
+    aggregates the current candle plus the next N-1 candles (T, T+1, ..., T+N-1).
 
-    This creates a rolling/sliding window view of the market at 3-minute scale.
+    This creates a rolling/sliding window view of the market at N-minute scale.
 
 AGGREGATION RULES:
-    For klines at times T, T+1, T+2:
+    For klines at times T, T+1, ..., T+N-1:
     - open_time:  T (start of first candle)
-    - close_time: T+2's close_time (end of third candle)
+    - close_time: T+N-1's close_time (end of last candle)
     - open:       T's open price
-    - high:       max(T.high, T+1.high, T+2.high)
-    - low:        min(T.low, T+1.low, T+2.low)
-    - close:      T+2's close price
+    - high:       max(all highs in window)
+    - low:        min(all lows in window)
+    - close:      T+N-1's close price
     - volume:     sum of all volumes
     - trades:     sum of all trades
 
@@ -28,13 +28,14 @@ INPUT:
     Default: binance_klines.db
 
 OUTPUT:
-    New SQLite database with 3-minute rolling klines
-    Default: binance_3min_klines.db
+    New SQLite database with N-minute rolling klines
+    Default: binance_rolling_{N}min_klines.db
 
 USAGE:
-    python scripts/binance_3min_kline_stats.py
-    python scripts/binance_3min_kline_stats.py --symbol ETHUSDT
-    python scripts/binance_3min_kline_stats.py --input custom.db --output custom_3min.db
+    python scripts/generate_rolling_klines.py                    # 3-minute (default)
+    python scripts/generate_rolling_klines.py --window 5         # 5-minute
+    python scripts/generate_rolling_klines.py --window 15        # 15-minute
+    python scripts/generate_rolling_klines.py --symbol ETHUSDT --window 5
 
 ================================================================================
 """
@@ -45,11 +46,14 @@ from pathlib import Path
 
 # Default paths
 DEFAULT_INPUT_DB = Path(__file__).parent.parent / "binance_klines.db"
-DEFAULT_OUTPUT_DB = Path(__file__).parent.parent / "binance_3min_klines.db"
 
-# Schema for 3-minute klines
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS klines_3min (
+
+def get_schema(window: int) -> str:
+    """Get schema for N-minute klines table."""
+    return f"""
+DROP TABLE IF EXISTS klines_{window}min;
+
+CREATE TABLE klines_{window}min (
     symbol TEXT NOT NULL,
     open_time INTEGER NOT NULL,
     open REAL NOT NULL,
@@ -62,59 +66,65 @@ CREATE TABLE IF NOT EXISTS klines_3min (
     PRIMARY KEY (symbol, open_time)
 );
 
-CREATE INDEX IF NOT EXISTS idx_klines_3min_symbol_time ON klines_3min(symbol, open_time);
+CREATE INDEX IF NOT EXISTS idx_klines_{window}min_symbol_time ON klines_{window}min(symbol, open_time);
 """
 
 
-def aggregate_klines(klines: list[dict]) -> dict | None:
-    """Aggregate multiple 1-min klines into a single 3-min kline.
+def aggregate_klines(klines: list[dict], window: int) -> dict | None:
+    """Aggregate multiple 1-min klines into a single N-min kline.
 
     Args:
-        klines: List of 3 consecutive 1-minute kline dicts.
+        klines: List of N consecutive 1-minute kline dicts.
+        window: Number of minutes to aggregate.
 
     Returns:
-        Aggregated 3-minute kline dict, or None if invalid input.
+        Aggregated N-minute kline dict, or None if invalid input.
     """
-    if len(klines) < 3:
+    if len(klines) < window:
         return None
 
-    k0, k1, k2 = klines[0], klines[1], klines[2]
-
     return {
-        "symbol": k0["symbol"],
-        "open_time": k0["open_time"],
-        "open": k0["open"],
-        "high": max(k0["high"], k1["high"], k2["high"]),
-        "low": min(k0["low"], k1["low"], k2["low"]),
-        "close": k2["close"],
-        "volume": k0["volume"] + k1["volume"] + k2["volume"],
-        "close_time": k2["close_time"],
-        "trades": k0["trades"] + k1["trades"] + k2["trades"],
+        "symbol": klines[0]["symbol"],
+        "open_time": klines[0]["open_time"],
+        "open": klines[0]["open"],
+        "high": max(k["high"] for k in klines),
+        "low": min(k["low"] for k in klines),
+        "close": klines[-1]["close"],
+        "volume": sum(k["volume"] for k in klines),
+        "close_time": klines[-1]["close_time"],
+        "trades": sum(k["trades"] for k in klines),
     }
 
 
-def generate_3min_klines(
+def generate_rolling_klines(
     input_db: Path,
     output_db: Path,
     symbol: str = "BTCUSDT",
+    window: int = 3,
 ) -> tuple[int, int]:
-    """Generate 3-minute rolling klines from 1-minute data.
+    """Generate N-minute rolling klines from 1-minute data.
 
     Args:
         input_db: Path to input SQLite database with 1-min klines.
-        output_db: Path to output SQLite database for 3-min klines.
+        output_db: Path to output SQLite database for N-min klines.
         symbol: Trading pair symbol to process.
+        window: Rolling window size in minutes.
 
     Returns:
-        Tuple of (total_1min_klines, generated_3min_klines).
+        Tuple of (total_1min_klines, generated_Nmin_klines).
     """
+    # Delete existing output file if it exists
+    if output_db.exists():
+        print(f"Removing existing database: {output_db}")
+        output_db.unlink()
+
     # Connect to input database
     input_conn = sqlite3.connect(str(input_db))
     input_conn.row_factory = sqlite3.Row
 
     # Connect to output database and create schema
     output_conn = sqlite3.connect(str(output_db))
-    output_conn.executescript(SCHEMA)
+    output_conn.executescript(get_schema(window))
     output_conn.commit()
 
     # Query all 1-minute klines for the symbol, ordered by time
@@ -132,35 +142,35 @@ def generate_3min_klines(
     klines = [dict(row) for row in cursor.fetchall()]
     total_1min = len(klines)
 
-    if total_1min < 3:
-        print(f"Not enough 1-minute klines ({total_1min}) to generate 3-minute klines")
+    if total_1min < window:
+        print(f"Not enough 1-minute klines ({total_1min}) to generate {window}-minute klines")
         input_conn.close()
         output_conn.close()
         return total_1min, 0
 
     print(f"Processing {total_1min:,} 1-minute klines for {symbol}...")
 
-    # Generate 3-minute klines using sliding window
+    # Generate N-minute klines using sliding window
     generated = 0
     batch = []
     batch_size = 10000
 
-    for i in range(len(klines) - 2):  # Stop 2 before end (need 3 candles)
-        window = klines[i:i+3]
-        kline_3min = aggregate_klines(window)
+    for i in range(len(klines) - window + 1):
+        kline_window = klines[i:i + window]
+        kline_nmin = aggregate_klines(kline_window, window)
 
-        if kline_3min:
-            batch.append(kline_3min)
+        if kline_nmin:
+            batch.append(kline_nmin)
             generated += 1
 
             if len(batch) >= batch_size:
-                _insert_batch(output_conn, batch)
+                _insert_batch(output_conn, batch, window)
                 batch = []
-                print(f"  Generated {generated:,} 3-minute klines...")
+                print(f"  Generated {generated:,} {window}-minute klines...")
 
     # Insert remaining batch
     if batch:
-        _insert_batch(output_conn, batch)
+        _insert_batch(output_conn, batch, window)
 
     input_conn.close()
     output_conn.close()
@@ -168,11 +178,11 @@ def generate_3min_klines(
     return total_1min, generated
 
 
-def _insert_batch(conn: sqlite3.Connection, klines: list[dict]) -> None:
-    """Insert a batch of 3-minute klines."""
+def _insert_batch(conn: sqlite3.Connection, klines: list[dict], window: int) -> None:
+    """Insert a batch of N-minute klines."""
     conn.executemany(
-        """
-        INSERT OR REPLACE INTO klines_3min
+        f"""
+        INSERT OR REPLACE INTO klines_{window}min
         (symbol, open_time, open, high, low, close, volume, close_time, trades)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
@@ -194,21 +204,21 @@ def _insert_batch(conn: sqlite3.Connection, klines: list[dict]) -> None:
     conn.commit()
 
 
-def get_stats(db_path: Path, symbol: str) -> dict:
-    """Get statistics for 3-minute klines in database."""
+def get_stats(db_path: Path, symbol: str, window: int) -> dict:
+    """Get statistics for N-minute klines in database."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
 
     cursor = conn.execute(
-        "SELECT COUNT(*) as count FROM klines_3min WHERE symbol = ?",
+        f"SELECT COUNT(*) as count FROM klines_{window}min WHERE symbol = ?",
         (symbol,)
     )
     count = cursor.fetchone()["count"]
 
     cursor = conn.execute(
-        """
+        f"""
         SELECT MIN(open_time) as min_time, MAX(open_time) as max_time
-        FROM klines_3min WHERE symbol = ?
+        FROM klines_{window}min WHERE symbol = ?
         """,
         (symbol,)
     )
@@ -226,7 +236,13 @@ def get_stats(db_path: Path, symbol: str) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate rolling 3-minute klines from 1-minute data"
+        description="Generate rolling N-minute klines from 1-minute data"
+    )
+    parser.add_argument(
+        "--window", "-w",
+        type=int,
+        default=3,
+        help="Rolling window size in minutes (default: 3)",
     )
     parser.add_argument(
         "--symbol",
@@ -244,12 +260,14 @@ def main():
         "--output",
         type=str,
         default=None,
-        help="Output SQLite database path (default: binance_3min_klines.db)",
+        help="Output SQLite database path (default: binance_rolling_{N}min_klines.db)",
     )
     args = parser.parse_args()
 
     input_db = Path(args.input) if args.input else DEFAULT_INPUT_DB
-    output_db = Path(args.output) if args.output else DEFAULT_OUTPUT_DB
+    output_db = Path(args.output) if args.output else (
+        Path(__file__).parent.parent / f"binance_rolling_{args.window}min_klines.db"
+    )
 
     if not input_db.exists():
         print(f"Error: Input database not found: {input_db}")
@@ -257,26 +275,29 @@ def main():
         return 1
 
     print("=" * 60)
-    print("GENERATE 3-MINUTE ROLLING KLINES")
+    print(f"GENERATE {args.window}-MINUTE ROLLING KLINES")
     print("=" * 60)
     print(f"Input:  {input_db}")
     print(f"Output: {output_db}")
     print(f"Symbol: {args.symbol}")
+    print(f"Window: {args.window} minutes")
     print()
 
-    total_1min, generated = generate_3min_klines(input_db, output_db, args.symbol)
+    total_1min, generated = generate_rolling_klines(
+        input_db, output_db, args.symbol, args.window
+    )
 
     print()
     print("=" * 60)
     print("RESULTS")
     print("=" * 60)
     print(f"1-minute klines processed: {total_1min:,}")
-    print(f"3-minute klines generated: {generated:,}")
+    print(f"{args.window}-minute klines generated: {generated:,}")
 
     if generated > 0:
-        stats = get_stats(output_db, args.symbol)
+        stats = get_stats(output_db, args.symbol, args.window)
         print(f"\nDatabase stats:")
-        print(f"  Total 3-min klines: {stats['count']:,}")
+        print(f"  Total {args.window}-min klines: {stats['count']:,}")
 
     return 0
 
