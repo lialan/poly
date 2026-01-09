@@ -49,6 +49,8 @@ class MarketAnalysis:
     # Time analysis
     start_time: float | None
     time_to_threshold: float | None  # seconds from market start to threshold hit
+    # Orderbook depth at threshold
+    threshold_depth: float | None  # total shares in orderbook when threshold hit
 
 
 def get_yes_mid_price(orderbook_json: str) -> float | None:
@@ -70,6 +72,21 @@ def get_yes_mid_price(orderbook_json: str) -> float | None:
         return None
 
 
+def get_orderbook_depth(orderbook_json: str) -> float | None:
+    """Extract total orderbook depth (shares) from orderbook JSON."""
+    try:
+        data = json.loads(orderbook_json)
+        total = 0.0
+        for key in ["yes_bids", "yes_asks", "no_bids", "no_asks"]:
+            orders = data.get(key, [])
+            for order in orders:
+                # order is [price, size]
+                total += order[1]
+        return total if total > 0 else None
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError, IndexError):
+        return None
+
+
 def analyze_market(snapshots: list[dict], threshold: float) -> MarketAnalysis:
     """Analyze a single market's probability trajectory.
 
@@ -86,13 +103,13 @@ def analyze_market(snapshots: list[dict], threshold: float) -> MarketAnalysis:
     sorted_snaps = sorted(snapshots, key=lambda x: x.get("ts", 0))
 
     # Track probability and price over time
-    data_points = []  # [(ts, prob, spot_price), ...]
+    data_points = []  # [(ts, prob, spot_price, orderbook_json), ...]
     for snap in sorted_snaps:
         orderbook = snap.get("orderbook", "{}")
         prob = get_yes_mid_price(orderbook)
         spot_price = snap.get("spot_price", 0)
         if prob is not None:
-            data_points.append((snap.get("ts", 0), prob, spot_price))
+            data_points.append((snap.get("ts", 0), prob, spot_price, orderbook))
 
     if not data_points:
         return MarketAnalysis(
@@ -109,6 +126,7 @@ def analyze_market(snapshots: list[dict], threshold: float) -> MarketAnalysis:
             log_price_delta=None,
             start_time=None,
             time_to_threshold=None,
+            threshold_depth=None,
         )
 
     # Get start time and price
@@ -123,17 +141,20 @@ def analyze_market(snapshots: list[dict], threshold: float) -> MarketAnalysis:
     first_extreme = None
     first_extreme_time = None
     threshold_price = None
+    threshold_depth = None
 
-    for ts, prob, price in data_points:
+    for ts, prob, price, ob_json in data_points:
         if prob >= HIGH_THRESHOLD:
             first_extreme = "high"
             first_extreme_time = ts
             threshold_price = price if price > 0 else None
+            threshold_depth = get_orderbook_depth(ob_json)
             break
         elif prob <= LOW_THRESHOLD:
             first_extreme = "low"
             first_extreme_time = ts
             threshold_price = price if price > 0 else None
+            threshold_depth = get_orderbook_depth(ob_json)
             break
 
     # Calculate log price delta and time to threshold
@@ -146,7 +167,7 @@ def analyze_market(snapshots: list[dict], threshold: float) -> MarketAnalysis:
         time_to_threshold = first_extreme_time - start_time
 
     # Determine final outcome from last snapshot
-    final_ts, final_prob, _ = data_points[-1]
+    final_ts, final_prob, _, _ = data_points[-1]
     final_outcome = None
 
     # Consider 95%+ as UP won, 5%- as DOWN won
@@ -158,8 +179,8 @@ def analyze_market(snapshots: list[dict], threshold: float) -> MarketAnalysis:
     elif final_prob <= FINAL_LOW:
         final_outcome = "down"
 
-    min_prob = min(p for _, p, _ in data_points)
-    max_prob = max(p for _, p, _ in data_points)
+    min_prob = min(p for _, p, _, _ in data_points)
+    max_prob = max(p for _, p, _, _ in data_points)
 
     return MarketAnalysis(
         market_id=market_id,
@@ -175,6 +196,7 @@ def analyze_market(snapshots: list[dict], threshold: float) -> MarketAnalysis:
         log_price_delta=log_price_delta,
         start_time=start_time,
         time_to_threshold=time_to_threshold,
+        threshold_depth=threshold_depth,
     )
 
 
@@ -339,17 +361,22 @@ Examples:
             # Distribution buckets with success rate (0-3min, 3-6min, 6-9min, 9-12min, 12-15min)
             buckets_correct = [0, 0, 0, 0, 0]
             buckets_total = [0, 0, 0, 0, 0]
-            for t in times_correct:
-                idx = min(int(t // 180), 4)
-                buckets_correct[idx] += 1
+            buckets_depth: list[list[float]] = [[], [], [], [], []]  # depths per bucket for correct predictions
+            for a in hit_high_then_up:
+                if a.time_to_threshold is not None:
+                    idx = min(int(a.time_to_threshold // 180), 4)
+                    buckets_correct[idx] += 1
+                    if a.threshold_depth is not None:
+                        buckets_depth[idx].append(a.threshold_depth)
             for t, is_correct in times_all:
                 idx = min(int(t // 180), 4)
                 buckets_total[idx] += 1
-            print(f"    Distribution (with success rate):")
+            print(f"    Distribution (with success rate and avg depth):")
             for i, label in enumerate(["0-3min", "3-6min", "6-9min", "9-12min", "12-15min"]):
                 pct = buckets_correct[i]/len(times_correct)*100 if times_correct else 0
                 success_rate = buckets_correct[i]/buckets_total[i]*100 if buckets_total[i] > 0 else 0
-                print(f"      {label:8s} {buckets_correct[i]:3d} ({pct:5.1f}%) | P(success): {success_rate:5.1f}% ({buckets_correct[i]}/{buckets_total[i]})")
+                avg_depth = sum(buckets_depth[i])/len(buckets_depth[i]) if buckets_depth[i] else 0
+                print(f"      {label:8s} {buckets_correct[i]:3d} ({pct:5.1f}%) | P(success): {success_rate:5.1f}% ({buckets_correct[i]}/{buckets_total[i]}) | Avg depth: {avg_depth:,.0f}")
 
         # Log price delta for incorrectly predicted (hit high -> DOWN won)
         deltas_wrong = [a.log_price_delta for a in hit_high_then_down if a.log_price_delta is not None]
@@ -411,17 +438,22 @@ Examples:
             # Distribution buckets with success rate (0-3min, 3-6min, 6-9min, 9-12min, 12-15min)
             buckets_correct = [0, 0, 0, 0, 0]
             buckets_total = [0, 0, 0, 0, 0]
-            for t in times_correct:
-                idx = min(int(t // 180), 4)
-                buckets_correct[idx] += 1
+            buckets_depth: list[list[float]] = [[], [], [], [], []]  # depths per bucket for correct predictions
+            for a in hit_low_then_down:
+                if a.time_to_threshold is not None:
+                    idx = min(int(a.time_to_threshold // 180), 4)
+                    buckets_correct[idx] += 1
+                    if a.threshold_depth is not None:
+                        buckets_depth[idx].append(a.threshold_depth)
             for t, is_correct in times_all:
                 idx = min(int(t // 180), 4)
                 buckets_total[idx] += 1
-            print(f"    Distribution (with success rate):")
+            print(f"    Distribution (with success rate and avg depth):")
             for i, label in enumerate(["0-3min", "3-6min", "6-9min", "9-12min", "12-15min"]):
                 pct = buckets_correct[i]/len(times_correct)*100 if times_correct else 0
                 success_rate = buckets_correct[i]/buckets_total[i]*100 if buckets_total[i] > 0 else 0
-                print(f"      {label:8s} {buckets_correct[i]:3d} ({pct:5.1f}%) | P(success): {success_rate:5.1f}% ({buckets_correct[i]}/{buckets_total[i]})")
+                avg_depth = sum(buckets_depth[i])/len(buckets_depth[i]) if buckets_depth[i] else 0
+                print(f"      {label:8s} {buckets_correct[i]:3d} ({pct:5.1f}%) | P(success): {success_rate:5.1f}% ({buckets_correct[i]}/{buckets_total[i]}) | Avg depth: {avg_depth:,.0f}")
 
         # Log price delta for incorrectly predicted (hit low -> UP won)
         deltas_wrong = [a.log_price_delta for a in hit_low_then_up if a.log_price_delta is not None]
