@@ -8,7 +8,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from poly.binance_price import (
+from poly.api.binance import (
     get_btc_price,
     get_eth_price,
     get_prices,

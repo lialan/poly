@@ -401,7 +401,7 @@ class PolymarketConfig:
             ValueError: If required credentials are missing
             ImportError: If required packages are not installed
         """
-        from poly.signer import (
+        from .signer import (
             Signer,
             LocalSigner,
             KMSSigner,

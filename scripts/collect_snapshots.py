@@ -24,8 +24,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from poly.market_snapshot import fetch_current_snapshot, MarketSnapshot
-from poly.db_writer import get_db_writer
-from poly.binance_price import get_btc_price
+from poly.storage.db_writer import get_db_writer
+from poly.api.binance import get_btc_price
 
 # Global flag for graceful shutdown
 running = True

@@ -9,7 +9,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from poly.sqlite_writer import SQLiteWriter
+from poly.storage.sqlite import SQLiteWriter
 from poly.market_snapshot import fetch_current_snapshot
 
 # Use a test database

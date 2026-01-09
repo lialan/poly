@@ -24,7 +24,7 @@ Usage:
 import os
 from typing import Optional, Union, Protocol, runtime_checkable
 
-from .sqlite_writer import SQLiteWriter
+from .sqlite import SQLiteWriter
 
 
 @runtime_checkable
@@ -138,7 +138,7 @@ def get_db_writer(
         return SQLiteWriter(sqlite_path)
 
     elif backend == "bigtable":
-        from .bigtable_writer import BigtableWriter
+        from .bigtable import BigtableWriter
 
         writer = BigtableWriter(
             project_id=project_id or os.getenv("BIGTABLE_PROJECT_ID"),

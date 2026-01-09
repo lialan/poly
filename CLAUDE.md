@@ -17,26 +17,39 @@ A Python-based platform for collecting and analyzing Polymarket crypto predictio
 ```
 poly/
 ├── src/poly/
-│   ├── __init__.py           # Package exports
-│   ├── markets.py            # Unified BTC/ETH prediction markets
-│   ├── market_snapshot.py    # Orderbook snapshots
+│   ├── __init__.py           # Package exports (backward compatible)
+│   ├── api/                  # External API clients
+│   │   ├── __init__.py       # API exports
+│   │   ├── polymarket.py     # Polymarket REST API (PolymarketAPI)
+│   │   ├── polymarket_ws.py  # Polymarket WebSocket (PolymarketWS)
+│   │   ├── polymarket_config.py  # Config with Secret Manager
+│   │   ├── signer.py         # Order signing (local/KMS)
+│   │   ├── gamma.py          # Gamma API for public event data
+│   │   ├── binance.py        # Binance REST API (prices, klines)
+│   │   ├── binance_ws.py     # Binance WebSocket (real-time klines)
+│   │   └── chainlink.py      # Chainlink on-chain prices
+│   ├── query/                # Simple query convenience functions
+│   │   ├── __init__.py       # Query exports
+│   │   ├── prices.py         # get_btc_price(), get_eth_price()
+│   │   ├── orderbook.py      # get_orderbook(), get_btc_15m_snapshot()
+│   │   └── markets.py        # get_btc_15m_market(), find_markets()
+│   ├── storage/              # Database backends
+│   │   ├── __init__.py       # Storage exports
+│   │   ├── bigtable.py       # Google Cloud Bigtable
+│   │   ├── sqlite.py         # SQLite database
+│   │   └── db_writer.py      # Database abstraction layer
+│   ├── markets.py            # Asset, MarketHorizon enums
+│   ├── market_snapshot.py    # MarketSnapshot dataclass
 │   ├── market_feed.py        # WebSocket daemon for real-time data
-│   ├── polymarket_api.py     # Async/sync API client (positions, trades)
-│   ├── polymarket_config.py  # Config with Secret Manager support
-│   ├── polymarket_ws.py      # Low-level WebSocket client
-│   ├── signer.py             # Order signing (local key / Google KMS)
-│   ├── binance_price.py      # Binance price data (REST)
-│   ├── bigtable_writer.py    # Google Cloud Bigtable storage
-│   ├── sqlite_writer.py      # SQLite database storage
-│   ├── db_writer.py          # Database backend abstraction
-│   ├── gamma.py              # Gamma API for public event data
+│   ├── trading_bot.py        # Monitoring bot with WebSocket + Bigtable
+│   ├── trading.py            # TradingEngine for strategy execution
 │   ├── client.py             # PolymarketClient - API interactions
 │   ├── config.py             # Config class with env loading
 │   ├── models.py             # Market, Order, Position models
-│   ├── trading.py            # TradingEngine for strategy execution
-│   ├── trading_bot.py        # Monitoring bot with WebSocket + Bigtable
 │   ├── project_config.py     # Centralized config loader
-│   ├── tui.py                # TUI script launcher (poly-tui command)
+│   ├── bigtable_status.py    # Bigtable collection status
+│   ├── telegram_notifier.py  # Telegram notifications
+│   ├── tui.py                # TUI script launcher (poly-tui)
 │   ├── script_discovery.py   # Script auto-discovery
 │   └── utils.py              # Helpers (retry, formatting)
 ├── scripts/
@@ -56,6 +69,59 @@ poly/
 ├── pyproject.toml
 ├── DEPLOYMENT.md
 └── .gitignore
+```
+
+## Package Organization
+
+### Import Patterns
+```python
+# Recommended: Use submodule imports for clarity
+from poly.api import PolymarketAPI, PolymarketConfig
+from poly.query import get_btc_price, get_btc_15m_market
+from poly.storage import BigtableWriter, SQLiteWriter
+
+# Also supported: Root-level imports (backward compatible)
+from poly import PolymarketAPI, get_btc_price, BigtableWriter
+```
+
+### `poly.api` - External API Clients
+All external service integrations:
+- `poly.api.polymarket` - Polymarket REST API
+- `poly.api.polymarket_ws` - Polymarket WebSocket
+- `poly.api.polymarket_config` - Configuration with Secret Manager
+- `poly.api.signer` - Order signing (local key, KMS)
+- `poly.api.gamma` - Gamma API (public event data)
+- `poly.api.binance` - Binance REST API (prices, klines)
+- `poly.api.binance_ws` - Binance WebSocket (real-time klines)
+- `poly.api.chainlink` - Chainlink on-chain prices
+
+### `poly.query` - Simple Query Functions
+Convenience wrappers for common queries:
+```python
+from poly.query import (
+    # Prices
+    get_btc_price, get_eth_price,      # async
+    get_btc_price_sync, get_eth_price_sync,  # sync
+    get_btc_24h_change,
+
+    # Orderbooks
+    get_orderbook, get_market_snapshot,
+    get_btc_15m_snapshot, get_eth_15m_snapshot,
+
+    # Markets
+    get_btc_15m_market, get_btc_1h_market,
+    find_markets, get_market_token_ids,
+)
+```
+
+### `poly.storage` - Database Backends
+```python
+from poly.storage import (
+    SQLiteWriter,           # Local SQLite database
+    BigtableWriter,         # Google Cloud Bigtable
+    get_db_writer,          # Factory function
+    DBWriter,               # Protocol for type hints
+)
 ```
 
 ## Core Modules
@@ -96,7 +162,7 @@ Minimal snapshot structure storing only non-derivable data.
 
 **Derived properties:** `best_yes_bid/ask`, `yes_mid`, `yes_spread`, etc.
 
-### `polymarket_api.py` - API Client
+### `api/polymarket.py` - API Client
 Async and sync clients for querying wallet positions, trades, and market status.
 
 **Classes:**
@@ -124,7 +190,7 @@ async with PolymarketAPI(config) as api:
     shares = await api.get_shares_for_market("btc-updown-15m-...")
 ```
 
-### `polymarket_config.py` - Configuration
+### `api/polymarket_config.py` - Configuration
 Configuration with Google Secret Manager support and env var fallback.
 
 **Classes:**
@@ -142,7 +208,7 @@ Configuration with Google Secret Manager support and env var fallback.
 - `POLYMARKET_SIGNER_TYPE` (optional: `local`, `kms`, or `eoa`)
 - `POLYMARKET_KMS_KEY_PATH` (optional, for KMS signing)
 
-### `signer.py` - Order Signing Interface
+### `api/signer.py` - Order Signing Interface
 Pluggable signing implementations for Polymarket CLOB orders.
 
 **Signer Types:**
@@ -239,7 +305,7 @@ print(f"BTC probability: {state.implied_prob:.1%}")
 - Update rate: ~70-100 updates/sec
 - Latency per update: ~1-2ms
 
-### `polymarket_ws.py` - Low-level WebSocket
+### `api/polymarket_ws.py` - Low-level WebSocket
 Lower-level WebSocket client for custom implementations.
 
 **Endpoint:** `wss://ws-subscriptions-clob.polymarket.com/ws/market`
@@ -382,7 +448,7 @@ Auto-discovers Python scripts and extracts metadata from docstrings.
 - `get_scripts_by_category()` - Group scripts by category
 - `categorize(filename)` - Determine script category
 
-### `bigtable_writer.py` - Bigtable Storage
+### `storage/bigtable.py` - Bigtable Storage
 **Tables:**
 - `btc_15m_snapshot`, `btc_1h_snapshot`, `btc_4h_snapshot`, `btc_d1_snapshot`
 - `eth_15m_snapshot`, `eth_1h_snapshot`, `eth_4h_snapshot`

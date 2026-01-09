@@ -37,7 +37,7 @@ from .markets import (
     CryptoPrediction,
 )
 from .market_feed import MarketFeed, MarketState, PriceUpdate
-from .bigtable_writer import (
+from .storage.bigtable import (
     BigtableWriter,
     TABLE_BTC_15M,
     TABLE_BTC_1H,
@@ -47,8 +47,8 @@ from .bigtable_writer import (
     TABLE_ETH_1H,
     TABLE_ETH_4H,
 )
-from .polymarket_api import PolymarketAPI
-from .polymarket_config import PolymarketConfig
+from .api.polymarket import PolymarketAPI
+from .api.polymarket_config import PolymarketConfig
 
 logger = logging.getLogger(__name__)
 

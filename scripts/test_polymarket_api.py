@@ -29,8 +29,8 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from poly.polymarket_config import PolymarketConfig
-from poly.polymarket_api import (
+from poly.api.polymarket_config import PolymarketConfig
+from poly.api.polymarket import (
     PolymarketAPI,
     PolymarketAPISync,
     MarketStatus,

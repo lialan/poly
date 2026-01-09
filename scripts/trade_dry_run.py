@@ -35,7 +35,7 @@ from poly import (
     ExecutionConfig,
     TradingNotConfiguredError,
 )
-from poly.polymarket_config import PolymarketConfig
+from poly.api.polymarket_config import PolymarketConfig
 from poly.project_config import get_polymarket_config
 
 

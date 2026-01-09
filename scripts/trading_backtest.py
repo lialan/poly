@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from scipy.stats import norm
 
 from poly.markets import Asset, MarketHorizon
-from poly.bigtable_writer import (
+from poly.storage.bigtable import (
     BigtableWriter,
     TABLE_BTC_15M, TABLE_BTC_1H, TABLE_BTC_4H, TABLE_BTC_D1,
     TABLE_ETH_15M, TABLE_ETH_1H, TABLE_ETH_4H,

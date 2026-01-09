@@ -23,7 +23,7 @@ from urllib.parse import urlencode
 
 import aiohttp
 
-from poly.polymarket_config import PolymarketConfig
+from .polymarket_config import PolymarketConfig
 
 # TypeVar for generic return type in sync wrapper
 T = TypeVar("T")
@@ -747,7 +747,7 @@ class PolymarketAPI:
             TradingNotConfiguredError: If credentials not configured
             ImportError: If py-clob-client not installed
         """
-        from poly.signer import LocalSigner
+        from .signer import LocalSigner
 
         signer = self._get_signer()
 
@@ -1534,8 +1534,8 @@ class PolymarketAPI:
         Raises:
             TradingError: If order placement fails
         """
-        from poly.signer import LocalSigner, KMSSigner, OrderParams
-        from poly.signer import OrderSide as SignerOrderSide
+        from .signer import LocalSigner, KMSSigner, OrderParams
+        from .signer import OrderSide as SignerOrderSide
 
         signer = self._get_signer()
 
@@ -1650,7 +1650,7 @@ class PolymarketAPI:
 
     def _cancel_order_sync(self, order_id: str) -> bool:
         """Synchronous order cancellation (runs in executor)."""
-        from poly.signer import LocalSigner
+        from .signer import LocalSigner
 
         signer = self._get_signer()
 
@@ -1689,7 +1689,7 @@ class PolymarketAPI:
 
     def _get_order_sync(self, order_id: str) -> OrderInfo:
         """Synchronous order status query (runs in executor)."""
-        from poly.signer import LocalSigner
+        from .signer import LocalSigner
 
         signer = self._get_signer()
 

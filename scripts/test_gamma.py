@@ -8,7 +8,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from poly.gamma import fetch_event_from_url, fetch_event_by_slug
+from poly.api.gamma import fetch_event_from_url, fetch_event_by_slug
 
 
 async def main():

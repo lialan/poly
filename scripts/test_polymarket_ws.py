@@ -25,7 +25,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from poly.polymarket_ws import (
+from poly.api.polymarket_ws import (
     PolymarketWS,
     MultiMarketWS,
     MarketUpdate,
@@ -49,8 +49,8 @@ async def get_token_id_from_market(market_slug: str = None) -> tuple[str, str, s
 
     # Fall back to API query if prediction fails
     if market_slug:
-        from poly.polymarket_api import PolymarketAPI
-        from poly.polymarket_config import PolymarketConfig
+        from poly.api.polymarket import PolymarketAPI
+        from poly.api.polymarket_config import PolymarketConfig
 
         config = PolymarketConfig(wallet_address="0x56687bf447db6ffa42ffe2204a05edaa20f55839")
         async with PolymarketAPI(config) as api:

@@ -26,9 +26,9 @@ import aiohttp
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from poly.db_writer import get_db_writer
-from poly.binance_price import get_btc_price, get_eth_price
-from poly.bigtable_writer import (
+from poly.storage.db_writer import get_db_writer
+from poly.api.binance import get_btc_price, get_eth_price
+from poly.storage.bigtable import (
     TABLE_BTC_15M, TABLE_BTC_1H, TABLE_BTC_4H, TABLE_BTC_D1,
     TABLE_ETH_15M, TABLE_ETH_1H, TABLE_ETH_4H,
 )

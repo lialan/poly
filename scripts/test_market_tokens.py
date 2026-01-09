@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, "src")
 
 from poly import Asset, MarketHorizon, get_slug, PolymarketAPI
-from poly.polymarket_config import PolymarketConfig
+from poly.api.polymarket_config import PolymarketConfig
 
 
 SLOT_LABELS = ["current", "next", "next+1", "next+2"]

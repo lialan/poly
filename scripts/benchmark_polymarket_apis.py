@@ -45,8 +45,8 @@ def print_stats(name: str, times: list[float]):
 
 async def get_valid_token_id():
     """Get a valid token ID from an active market."""
-    from poly.polymarket_api import PolymarketAPI
-    from poly.polymarket_config import PolymarketConfig
+    from poly.api.polymarket import PolymarketAPI
+    from poly.api.polymarket_config import PolymarketConfig
 
     config = PolymarketConfig(wallet_address="0x56687bf447db6ffa42ffe2204a05edaa20f55839")
     async with PolymarketAPI(config) as api:
@@ -197,8 +197,8 @@ async def test_custom_api_async(token_id: str):
     print("Testing: Custom PolymarketAPI (async, uses aiohttp)")
     print("=" * 60)
 
-    from poly.polymarket_api import PolymarketAPI
-    from poly.polymarket_config import PolymarketConfig
+    from poly.api.polymarket import PolymarketAPI
+    from poly.api.polymarket_config import PolymarketConfig
 
     config = PolymarketConfig(wallet_address="0x56687bf447db6ffa42ffe2204a05edaa20f55839")
 
