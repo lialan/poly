@@ -31,7 +31,6 @@ def query_snapshots(
     instance_id: str = "poly-data",
     table_name: str = "market_snapshots",
     count: int = 5,
-    show_depth: bool = False,
 ):
     """Query latest snapshots from Bigtable."""
     client = bigtable.Client(project=project_id, admin=True)
@@ -80,19 +79,24 @@ def query_snapshots(
             except (json.JSONDecodeError, KeyError, TypeError):
                 pass
 
+        # Calculate depth (total shares on each side)
+        yes_bid_depth, yes_ask_depth = 0.0, 0.0
+        no_bid_depth, no_ask_depth = 0.0, 0.0
+        if orderbook_str != "N/A":
+            try:
+                ob = json.loads(orderbook_str)
+                yes_bid_depth = sum(b[1] for b in ob.get("yes_bids", []))
+                yes_ask_depth = sum(a[1] for a in ob.get("yes_asks", []))
+                no_bid_depth = sum(b[1] for b in ob.get("no_bids", []))
+                no_ask_depth = sum(a[1] for a in ob.get("no_asks", []))
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
+
         print(f"[{row_count}] {get_val(b'market_id')}")
         print(f"    Time:      {dt.strftime('%Y-%m-%d %H:%M:%S UTC') if dt else 'N/A'}")
         print(f"    Spot Price: ${float(get_val(b'spot_price')):,.2f}" if get_val(b"spot_price") != "N/A" else "    Spot Price: N/A")
-        print(f"    YES:       bid={yes_bid} / ask={yes_ask}")
-        print(f"    NO:        bid={no_bid} / ask={no_ask}")
-
-        if show_depth and orderbook_str != "N/A":
-            try:
-                ob = json.loads(orderbook_str)
-                print(f"    Depth YES: {len(ob.get('yes_bids', []))} bids, {len(ob.get('yes_asks', []))} asks")
-                print(f"    Depth NO:  {len(ob.get('no_bids', []))} bids, {len(ob.get('no_asks', []))} asks")
-            except (json.JSONDecodeError, KeyError):
-                pass
+        print(f"    YES:       bid={yes_bid} / ask={yes_ask}  (depth: {yes_bid_depth:,.0f} / {yes_ask_depth:,.0f})")
+        print(f"    NO:        bid={no_bid} / ask={no_ask}  (depth: {no_bid_depth:,.0f} / {no_ask_depth:,.0f})")
 
         print()
 
@@ -118,7 +122,6 @@ def main():
     parser.add_argument("--instance", default="poly-data", help="Bigtable instance ID")
     parser.add_argument("--table", default="btc_15m_snapshot", help="Table name")
     parser.add_argument("--count", type=int, default=5, help="Number of rows to fetch")
-    parser.add_argument("--depth", action="store_true", help="Show orderbook depth info")
     parser.add_argument("--list-tables", action="store_true", help="List all tables")
     parser.add_argument("--status", action="store_true", help="Show collection status for all tables")
 
@@ -135,7 +138,6 @@ def main():
             instance_id=args.instance,
             table_name=args.table,
             count=args.count,
-            show_depth=args.depth,
         )
 
 
