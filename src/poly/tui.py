@@ -104,14 +104,17 @@ SCRIPT_OPTIONS = {
 
     "bet_btc_15m.py": """
   Options:
-    -s, --side up|down      Side to bet on (required)
-    -a, --amount N          Amount in USD to bet (required)
-    -p, --price N           Limit price (default: market price)
+    -A, --action buy|sell   Action (default: buy)
+    -s, --side up|down      Side to trade (required)
+    -a, --amount N          Amount in USD (buy only)
+    -p, --price N           Limit price (default: best ask/bid)
     -n, --dry-run           Preview order without placing
 
   Examples:
-    --side up --amount 10           Bet $10 on UP
-    --side down --amount 5 --dry-run   Dry run $5 on DOWN""",
+    -s up -a 10             Buy $10 of UP shares
+    -s up -a 10 -p 0.45     Buy at limit price 0.45
+    -A sell -s up           Sell all UP shares
+    -A sell -s down -p 0.55 Sell DOWN at limit""",
 
     "approve_usdc.py": """
   Options:
@@ -124,22 +127,28 @@ SCRIPT_OPTIONS = {
     --amount 100            Approve $100 USDC
     --revoke                Revoke approval""",
 
-    "check_balance.py": """
+    "redeem_positions.py": """
   Options:
-    -w, --wallet ADDR       Check specific wallet address
-    -t, --trades N          Number of trades to show (default: 10)""",
+    -n, --dry-run           List positions without redeeming
+    -c, --condition ID      Redeem specific condition ID only
+
+  Examples:
+    --dry-run               List redeemable positions
+    (no args)               Redeem all resolved positions""",
 }
 
 
 def prompt_for_args(script: ScriptInfo) -> list[str]:
-    """Prompt user for script arguments."""
-    # Show script-specific options if available
-    options_hint = SCRIPT_OPTIONS.get(script.name)
-    if options_hint:
-        print(options_hint)
-    else:
-        print("\n  (No options documented - check script with --help)")
+    """Prompt user for script arguments.
 
+    Returns empty list immediately if script has no documented options.
+    """
+    # Only prompt if script has documented options
+    options_hint = SCRIPT_OPTIONS.get(script.name)
+    if not options_hint:
+        return []
+
+    print(options_hint)
     print("\n  Enter arguments (or press Enter for defaults):")
     try:
         args_input = input("  > ").strip()
@@ -276,7 +285,7 @@ def main():
 
         # Build main menu options
         main_options = []
-        category_order = ["trading", "manual_trade", "test", "simulation", "collector", "utility"]
+        category_order = ["trading", "manual_trade", "query", "test", "simulation", "collector", "utility"]
 
         for cat in category_order:
             if cat in by_category:

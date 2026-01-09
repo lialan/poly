@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 """
-Bet on BTC 15-minute prediction market.
+Trade on BTC 15-minute prediction market.
 
-Places a market order on the current live BTC 15m UP/DOWN market.
+Places buy or sell orders on the current live BTC 15m UP/DOWN market.
 
 Usage:
-    # Bet $10 on UP
+    # Buy $10 worth of UP shares (market order)
     python scripts/bet_btc_15m.py --side up --amount 10
 
-    # Bet $5 on DOWN
-    python scripts/bet_btc_15m.py --side down --amount 5
+    # Buy with limit price
+    python scripts/bet_btc_15m.py --side up --amount 10 --price 0.45
 
-    # Dry run (don't actually place order)
+    # Sell all UP shares (market order - uses best bid)
+    python scripts/bet_btc_15m.py --action sell --side up
+
+    # Sell all DOWN shares with limit price
+    python scripts/bet_btc_15m.py --action sell --side down --price 0.55
+
+    # Dry run (preview without placing)
     python scripts/bet_btc_15m.py --side up --amount 10 --dry-run
-
-    # Use specific price instead of market price
-    python scripts/bet_btc_15m.py --side up --amount 10 --price 0.55
 
 Requirements:
     - POLYMARKET_WALLET_ADDRESS and POLYMARKET_PRIVATE_KEY must be set
@@ -114,25 +117,28 @@ async def get_market_info(api: PolymarketAPI, token_id: str) -> dict:
         return {"error": str(e)}
 
 
-async def place_bet(
+async def place_order(
+    action: str,
     side: str,
-    amount: float,
+    amount: float | None = None,
     price: float | None = None,
     dry_run: bool = False,
 ) -> int:
-    """Place a bet on the current BTC 15m market.
+    """Place an order on the current BTC 15m market.
 
     Args:
+        action: "buy" or "sell"
         side: "up" or "down"
-        amount: Amount in USD to bet
-        price: Limit price (None = use best ask for BUY)
+        amount: Amount in USD to spend (buy only, ignored for sell)
+        price: Limit price (None = best ask for buy, best bid for sell)
         dry_run: If True, don't actually place the order
 
     Returns:
         0 on success, 1 on error
     """
+    action_upper = action.upper()
     print("=" * 60)
-    print("BTC 15M BET")
+    print(f"BTC 15M {action_upper}")
     print(f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     print("=" * 60)
 
@@ -159,21 +165,25 @@ async def place_bet(
         print(f"    [WARN] No config found (dry-run mode)")
         config = PolymarketConfig(wallet_address="0x" + "0" * 40)
 
-    # Check USDC balance and allowance
-    print("\n[2] Checking USDC balance and allowance...")
-    try:
-        wallet_info = get_usdc_balance_and_allowance(config.wallet_address)
-        print(f"    USDC Balance:   ${wallet_info['balance']:.2f}")
-        print(f"    USDC Allowance: ${wallet_info['allowance']:.2f}")
-        print(f"    Exchange: {EXCHANGE_ADDRESS}")
+    # Check USDC balance (for buy) or skip (for sell)
+    is_buy = action.lower() == "buy"
+    if is_buy:
+        print("\n[2] Checking USDC balance and allowance...")
+        try:
+            wallet_info = get_usdc_balance_and_allowance(config.wallet_address)
+            print(f"    USDC Balance:   ${wallet_info['balance']:.2f}")
+            print(f"    USDC Allowance: ${wallet_info['allowance']:.2f}")
+            print(f"    Exchange: {EXCHANGE_ADDRESS}")
 
-        if wallet_info["balance"] < amount:
-            print(f"    [WARN] Insufficient balance for ${amount:.2f} bet")
-        if wallet_info["allowance"] < amount:
-            print(f"    [WARN] Insufficient allowance for ${amount:.2f} bet")
-            print(f"    You need to approve USDC spending on Polymarket first")
-    except Exception as e:
-        print(f"    [WARN] Could not check balance: {e}")
+            if amount and wallet_info["balance"] < amount:
+                print(f"    [WARN] Insufficient balance for ${amount:.2f} order")
+            if amount and wallet_info["allowance"] < amount:
+                print(f"    [WARN] Insufficient allowance for ${amount:.2f} order")
+                print(f"    You need to approve USDC spending on Polymarket first")
+        except Exception as e:
+            print(f"    [WARN] Could not check balance: {e}")
+    else:
+        print("\n[2] Sell order - will check shares after fetching market...")
 
     # Fetch current market
     print("\n[3] Fetching current BTC 15m market...")
@@ -247,44 +257,88 @@ async def place_bet(
     print(f"    Spread: {market_info['spread']:.4f}")
     print(f"    Depth: {market_info['bid_depth']} bids, {market_info['ask_depth']} asks")
 
+    # For SELL: fetch current shares
+    size = None
+    if not is_buy:
+        print(f"\n[6] Fetching current {outcome} position...")
+        if api is None:
+            print("    [ERROR] Cannot fetch positions without API client")
+            return 1
+        try:
+            shares = await api.get_shares_for_market(prediction.slug)
+            outcome_key = "Yes" if outcome == "UP" else "No"
+            current_shares = shares.get(outcome_key, 0.0)
+            print(f"    Current {outcome} shares: {current_shares:.4f}")
+
+            if current_shares <= 0:
+                print(f"    [ERROR] No {outcome} shares to sell")
+                await api.close()
+                return 1
+
+            size = current_shares
+        except Exception as e:
+            print(f"    [ERROR] Failed to fetch position: {e}")
+            if api:
+                await api.close()
+            return 1
+
     # Determine order price
     if price is not None:
         order_price = price
-        print(f"\n[6] Using specified price: {order_price:.4f}")
+        print(f"\n[7] Using specified limit price: {order_price:.4f}")
     else:
-        # For BUY, use best ask (take liquidity)
-        order_price = market_info["best_ask"]
-        print(f"\n[6] Using market price (best ask): {order_price:.4f}")
+        if is_buy:
+            # For BUY, use best ask (take liquidity)
+            order_price = market_info["best_ask"]
+            print(f"\n[7] Using market price (best ask): {order_price:.4f}")
+        else:
+            # For SELL, use best bid (take liquidity)
+            order_price = market_info["best_bid"]
+            print(f"\n[7] Using market price (best bid): {order_price:.4f}")
 
     if order_price <= 0 or order_price >= 1:
         print(f"    [ERROR] Invalid price: {order_price}")
+        if api:
+            await api.close()
         return 1
 
-    # Calculate size (shares = amount / price)
-    size = amount / order_price
-    cost = size * order_price
+    # Calculate size/cost
+    if is_buy:
+        # BUY: shares = amount / price
+        size = amount / order_price
+        cost = size * order_price
+        proceeds = 0.0
+    else:
+        # SELL: proceeds = shares * price
+        cost = 0.0
+        proceeds = size * order_price
 
-    print(f"\n[7] Order details:")
-    print(f"    Side: BUY {outcome}")
+    print(f"\n[8] Order details:")
+    print(f"    Action: {action_upper} {outcome}")
     print(f"    Price: {order_price:.4f}")
-    print(f"    Size: {size:.2f} shares")
-    print(f"    Cost: ${cost:.2f} USDC")
-    print(f"    Potential payout: ${size:.2f} (if {outcome} wins)")
-    print(f"    Potential profit: ${size - cost:.2f} ({(size - cost) / cost * 100:.1f}%)")
+    print(f"    Size: {size:.4f} shares")
+    if is_buy:
+        print(f"    Cost: ${cost:.2f} USDC")
+        print(f"    Potential payout: ${size:.2f} (if {outcome} wins)")
+        print(f"    Potential profit: ${size - cost:.2f} ({(size - cost) / cost * 100:.1f}%)")
+    else:
+        print(f"    Proceeds: ${proceeds:.2f} USDC (if filled)")
+        print(f"    Note: Selling forfeits any potential payout")
 
     if dry_run:
-        print("\n[8] DRY RUN - Order not placed")
+        print("\n[9] DRY RUN - Order not placed")
         print("    Remove --dry-run flag to place real order")
         if api:
             await api.close()
         return 0
 
     # Place order
-    print("\n[8] Placing order...")
+    order_side = OrderSide.BUY if is_buy else OrderSide.SELL
+    print(f"\n[9] Placing {action_upper} order...")
     try:
         result = await api.place_order(
             token_id=token_id,
-            side=OrderSide.BUY,
+            side=order_side,
             price=order_price,
             size=size,
         )
@@ -295,7 +349,7 @@ async def place_bet(
             print(f"    Submission time: {result.submission_time_ms:.0f}ms")
 
             # Check order status
-            print("\n[9] Checking order status...")
+            print("\n[10] Checking order status...")
             try:
                 order_info = await api.get_order(result.order_id)
                 print(f"    Status: {order_info.status}")
@@ -319,15 +373,21 @@ async def place_bet(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Bet on BTC 15-minute prediction market",
+        description="Trade on BTC 15-minute prediction market",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Bet $10 on UP
+    # Buy $10 of UP shares (market order)
     python scripts/bet_btc_15m.py --side up --amount 10
 
-    # Bet $5 on DOWN with specific price
-    python scripts/bet_btc_15m.py --side down --amount 5 --price 0.45
+    # Buy with limit price
+    python scripts/bet_btc_15m.py --side up --amount 10 --price 0.45
+
+    # Sell all UP shares (market order)
+    python scripts/bet_btc_15m.py --action sell --side up
+
+    # Sell all DOWN shares with limit price
+    python scripts/bet_btc_15m.py --action sell --side down --price 0.55
 
     # Dry run (preview without placing)
     python scripts/bet_btc_15m.py --side up --amount 10 --dry-run
@@ -335,24 +395,31 @@ Examples:
     )
 
     parser.add_argument(
+        "--action", "-A",
+        choices=["buy", "sell"],
+        default="buy",
+        help="Action: 'buy' or 'sell' (default: buy)",
+    )
+
+    parser.add_argument(
         "--side", "-s",
         required=True,
         choices=["up", "down", "UP", "DOWN"],
-        help="Side to bet on: 'up' or 'down'",
+        help="Side to trade: 'up' or 'down'",
     )
 
     parser.add_argument(
         "--amount", "-a",
         type=float,
-        required=True,
-        help="Amount in USD to bet",
+        default=None,
+        help="Amount in USD to spend (buy only, ignored for sell)",
     )
 
     parser.add_argument(
         "--price", "-p",
         type=float,
         default=None,
-        help="Limit price (default: use best ask)",
+        help="Limit price (default: best ask for buy, best bid for sell)",
     )
 
     parser.add_argument(
@@ -363,13 +430,16 @@ Examples:
 
     args = parser.parse_args()
 
-    # Validate amount
-    if args.amount <= 0:
-        print("Error: Amount must be positive")
-        return 1
-
-    if args.amount < 1:
-        print("Warning: Minimum practical bet is ~$1 due to fees")
+    # Validate args based on action
+    if args.action == "buy":
+        if args.amount is None:
+            print("Error: --amount is required for buy orders")
+            return 1
+        if args.amount <= 0:
+            print("Error: Amount must be positive")
+            return 1
+        if args.amount < 1:
+            print("Warning: Minimum practical bet is ~$1 due to fees")
 
     # Validate price if specified
     if args.price is not None:
@@ -377,7 +447,8 @@ Examples:
             print("Error: Price must be between 0 and 1 (exclusive)")
             return 1
 
-    return asyncio.run(place_bet(
+    return asyncio.run(place_order(
+        action=args.action,
         side=args.side,
         amount=args.amount,
         price=args.price,

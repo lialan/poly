@@ -579,9 +579,9 @@ def run_backtest(
 
             if data.m15_prices:
                 if position.side == "yes":
-                    exit_price = data.m15_prices.get("yes_bid", position.entry_price)
+                    exit_price = data.m15_prices.get("yes_bid") or position.entry_price
                 else:
-                    exit_price = data.m15_prices.get("no_bid", position.entry_price)
+                    exit_price = data.m15_prices.get("no_bid") or position.entry_price
 
                 exit_price_with_slippage = exit_price * (1 - config.slippage_pct)
                 gross_value = position.size_shares * exit_price_with_slippage
@@ -648,9 +648,9 @@ def run_backtest(
         for position in positions_to_close:
             if last_data.m15_prices:
                 if position.side == "yes":
-                    exit_price = last_data.m15_prices.get("yes_bid", position.entry_price)
+                    exit_price = last_data.m15_prices.get("yes_bid") or position.entry_price
                 else:
-                    exit_price = last_data.m15_prices.get("no_bid", position.entry_price)
+                    exit_price = last_data.m15_prices.get("no_bid") or position.entry_price
 
                 exit_price_with_slippage = exit_price * (1 - config.slippage_pct)
                 gross_value = position.size_shares * exit_price_with_slippage
@@ -671,15 +671,15 @@ def run_backtest(
             if verbose:
                 print(f"  Pos #{position.id}: PnL ${trade.pnl:.2f} ({trade.pnl_pct*100:.1f}%)")
 
-    if verbose:
-        print("\n" + "=" * 70)
-        print("RESULTS")
-        print("=" * 70)
-        print(f"Final Capital: ${state.capital:.2f}")
-        print(f"Total PnL: ${state.total_pnl:.2f} ({state.total_pnl/config.initial_capital*100:.1f}%)")
-        print(f"Trades: {len(state.trades)} (Win: {state.winning_trades}, Loss: {state.losing_trades})")
-        print(f"Win Rate: {state.win_rate*100:.1f}%")
-        print("=" * 70)
+    # Always print results summary
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    print(f"Final Capital: ${state.capital:.2f}")
+    print(f"Total PnL: ${state.total_pnl:.2f} ({state.total_pnl/config.initial_capital*100:.1f}%)")
+    print(f"Trades: {len(state.trades)} (Win: {state.winning_trades}, Loss: {state.losing_trades})")
+    print(f"Win Rate: {state.win_rate*100:.1f}%")
+    print("=" * 70)
 
     return state
 
@@ -791,25 +791,33 @@ def load_market_data(
 # ============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Time-Scale Consistency Trader (Multi-Trade)")
-    parser.add_argument("--asset", type=str, default="btc", choices=["btc", "eth"],
-                        help="Asset to trade (btc or eth)")
-    parser.add_argument("--hours-ago", type=float, default=6.0,
-                        help="Start backtest N hours ago")
-    parser.add_argument("--capital", type=float, default=100.0,
-                        help="Initial capital")
-    parser.add_argument("--bet-size", type=float, default=10.0,
-                        help="Bet size per trade")
-    parser.add_argument("--profit-target", type=float, default=0.25,
-                        help="Profit target (0.25 = 25%%)")
-    parser.add_argument("--min-mispricing", type=float, default=0.05,
-                        help="Minimum mispricing to trade")
-    parser.add_argument("--trade-interval", type=float, default=60.0,
-                        help="Minimum seconds between new trades (default: 60)")
+    parser = argparse.ArgumentParser(
+        description="Time-Scale Consistency Trader (Multi-Trade)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s -t 12 -q              # 12 hours, quiet mode
+  %(prog)s -a eth -t 24          # ETH, 24 hours
+  %(prog)s -c 1000 -b 50 -t 12   # $1000 capital, $50 bets, 12 hours
+""")
+    parser.add_argument("-a", "--asset", type=str, default="btc", choices=["btc", "eth"],
+                        help="Asset to trade (default: btc)")
+    parser.add_argument("-t", "--hours-ago", type=float, default=6.0,
+                        help="Hours of history to backtest (default: 6)")
+    parser.add_argument("-c", "--capital", type=float, default=100.0,
+                        help="Initial capital in USD (default: 100)")
+    parser.add_argument("-b", "--bet-size", type=float, default=10.0,
+                        help="Bet size per trade in USD (default: 10)")
+    parser.add_argument("-p", "--profit-target", type=float, default=0.25,
+                        help="Profit target ratio, 0.25 = 25%% (default: 0.25)")
+    parser.add_argument("-m", "--min-mispricing", type=float, default=0.05,
+                        help="Minimum mispricing to trade (default: 0.05)")
+    parser.add_argument("-i", "--trade-interval", type=float, default=60.0,
+                        help="Seconds between trades (default: 60)")
     parser.add_argument("--include-1h", action="store_true", default=True,
                         help="Load 1h data alongside 15m")
-    parser.add_argument("--quiet", action="store_true",
-                        help="Reduce output")
+    parser.add_argument("-q", "--quiet", action="store_true",
+                        help="Suppress trade-by-trade output")
 
     args = parser.parse_args()
 
