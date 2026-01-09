@@ -341,50 +341,6 @@ async def place_order_and_check(api: PolymarketAPI, token_id: str, price: float,
     return result
 
 
-async def wait_for_resolution(api: PolymarketAPI, market_slug: str,
-                               resolution_time: datetime, triggered_side: str) -> dict:
-    """Wait for market resolution and check result."""
-    result = {}
-    print(f"\n[4] Waiting for market resolution...")
-    now = datetime.now(timezone.utc)
-    wait_seconds = (resolution_time - now).total_seconds()
-
-    if wait_seconds <= 0:
-        return result
-
-    print(f"    Resolution in {wait_seconds:.0f} seconds...")
-    try:
-        while wait_seconds > 0:
-            sleep_chunk = min(wait_seconds, 30)
-            await asyncio.sleep(sleep_chunk)
-            wait_seconds -= sleep_chunk
-            if wait_seconds > 0:
-                print(f"    {wait_seconds:.0f}s remaining...")
-
-        print("    Waiting for resolution to finalize...")
-        await asyncio.sleep(10)
-
-        print(f"\n[5] Checking resolution...")
-        market_info = await api.get_market_info(market_slug)
-        if market_info:
-            result["market_status"] = market_info.status.value
-            result["resolution"] = market_info.outcome
-            print(f"    Market status: {market_info.status.value}")
-            print(f"    Outcome: {market_info.outcome}")
-
-            if market_info.outcome:
-                won = ((triggered_side == "UP" and "up" in market_info.outcome.lower()) or
-                       (triggered_side == "DOWN" and "down" in market_info.outcome.lower()))
-                result["won"] = won
-                print(f"    Result: {'WON' if won else 'LOST'}")
-        else:
-            print("    Could not fetch market info")
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        print("\n    [CANCELLED] Stopped waiting for resolution")
-
-    return result
-
-
 async def monitor_and_trade(
     api: PolymarketAPI,
     asset: Asset,
@@ -521,43 +477,65 @@ async def monitor_and_trade(
         await triggered.wait()
         trigger_info.print_details(threshold)
 
+        # Place order (real or simulated)
+        result["triggered_side"] = trigger_info.side
+        result["trigger_price"] = trigger_info.trigger_price
+
         if dry_run:
-            print(f"    [DRY RUN] Would place BUY {trigger_info.side} order")
-            result.update({"success": True, "order_id": "dry_run", "triggered_side": trigger_info.side,
-                          "trigger_price": trigger_info.trigger_price})
-            order_placed.set()
+            print(f"\n[3] [DRY RUN] Would place BUY {trigger_info.side} order at {trigger_info.trigger_price + 0.01:.3f}")
+            result.update({"success": True, "order_id": "dry_run"})
         else:
             order_result = await place_order_and_check(api, trigger_info.token_id,
                                                         trigger_info.trigger_price, size, trigger_info.side)
             result.update(order_result)
-            result["triggered_side"] = trigger_info.side
-            result["trigger_price"] = trigger_info.trigger_price
-            if order_result.get("success"):
-                order_placed.set()
+
+        if result.get("success"):
+            order_placed.set()
 
         # Wait for resolution (feeds keep running for study)
         if result.get("success") and wait_for_resolution_flag and resolution_time:
             print("\n[4] Monitoring continues during resolution wait...")
             print("    (Status updates continue in background)\n")
-            if dry_run:
-                # For dry run, just wait until resolution time while showing updates
-                now = datetime.now(timezone.utc)
-                wait_seconds = (resolution_time - now).total_seconds()
-                if wait_seconds > 0:
-                    print(f"    Resolution in {wait_seconds:.0f} seconds...")
-                    try:
-                        while wait_seconds > 0:
-                            sleep_chunk = min(wait_seconds, 30)
-                            await asyncio.sleep(sleep_chunk)
-                            wait_seconds -= sleep_chunk
-                            if wait_seconds > 0:
-                                print(f"    {wait_seconds:.0f}s remaining...")
-                        print("    [DRY RUN] Market would resolve now")
-                    except (asyncio.CancelledError, KeyboardInterrupt):
-                        print("\n    [CANCELLED] Stopped waiting")
-            else:
-                resolution_result = await wait_for_resolution(api, market.slug, resolution_time, result["triggered_side"])
-                result.update(resolution_result)
+
+            now = datetime.now(timezone.utc)
+            wait_seconds = (resolution_time - now).total_seconds()
+
+            if wait_seconds > 0:
+                print(f"    Resolution in {wait_seconds:.0f} seconds...")
+                try:
+                    while wait_seconds > 0:
+                        sleep_chunk = min(wait_seconds, 30)
+                        await asyncio.sleep(sleep_chunk)
+                        wait_seconds -= sleep_chunk
+                        if wait_seconds > 0:
+                            print(f"    {wait_seconds:.0f}s remaining...")
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    print("\n    [CANCELLED] Stopped waiting")
+                    result["cancelled"] = True
+
+            # Check resolution result
+            if not result.get("cancelled"):
+                print("    Waiting for resolution to finalize...")
+                await asyncio.sleep(10)
+
+                print(f"\n[5] Checking resolution...")
+                if dry_run:
+                    print("    [DRY RUN] Would check market resolution")
+                else:
+                    market_info = await api.get_market_info(market.slug)
+                    if market_info:
+                        result["market_status"] = market_info.status.value
+                        result["resolution"] = market_info.outcome
+                        print(f"    Market status: {market_info.status.value}")
+                        print(f"    Outcome: {market_info.outcome}")
+
+                        if market_info.outcome:
+                            won = ((result["triggered_side"] == "UP" and "up" in market_info.outcome.lower()) or
+                                   (result["triggered_side"] == "DOWN" and "down" in market_info.outcome.lower()))
+                            result["won"] = won
+                            print(f"    Result: {'WON' if won else 'LOST'}")
+                    else:
+                        print("    Could not fetch market info")
 
     except (asyncio.CancelledError, KeyboardInterrupt):
         print("\n\n[CANCELLED] Monitoring stopped")
