@@ -145,6 +145,40 @@ SCRIPT_OPTIONS = {
   Examples:
     --dry-run               List redeemable positions
     (no args)               Redeem all resolved positions""",
+
+    "generate_rolling_klines.py": """
+  Options:
+    -w, --window N          Rolling window size in minutes (default: 3)
+    --symbol SYMBOL         Trading pair symbol (default: BTCUSDT)
+    --input PATH            Input database path (default: binance_klines.db)
+    --output PATH           Output database path (auto-generated)
+
+  Examples:
+    (no args)               Generate 3-minute rolling klines
+    -w 5                    Generate 5-minute rolling klines
+    -w 15 --symbol ETHUSDT  15-minute klines for ETH""",
+
+    "kline_volatility_stats.py": """
+  Options:
+    --window N              Rolling window in minutes (default: 3)
+    --symbol SYMBOL         Trading pair symbol (default: BTCUSDT)
+    --db PATH               Database path (default: binance_klines.db)
+
+  Examples:
+    (no args)               3-minute volatility stats
+    --window 5              5-minute volatility stats
+    --window 15             15-minute volatility stats""",
+
+    "download_binance_klines.py": """
+  Options:
+    --days N                Number of days to download (default: 10)
+    --symbol SYMBOL         Trading pair symbol (default: BTCUSDT)
+    --db PATH               Database path (default: binance_klines.db)
+
+  Examples:
+    (no args)               Download last 10 days
+    --days 100              Download last 100 days
+    --days 1000             Download last 1000 days""",
 }
 
 
