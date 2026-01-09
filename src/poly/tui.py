@@ -160,25 +160,30 @@ SCRIPT_OPTIONS = {
 
     "kline_volatility_stats.py": """
   Options:
-    --window N              Rolling window in minutes (default: 3)
-    --symbol SYMBOL         Trading pair symbol (default: BTCUSDT)
+    -w, --window N          Rolling window in minutes (default: 3)
+    -s, --symbol SYMBOL     Trading pair symbol (default: BTCUSDT)
     --db PATH               Database path (default: binance_klines.db)
 
   Examples:
     (no args)               3-minute volatility stats
-    --window 5              5-minute volatility stats
-    --window 15             15-minute volatility stats""",
+    -w 5                    5-minute volatility stats
+    -w 15                   15-minute volatility stats
+    -s ETHUSDT -w 5         ETH 5-minute stats""",
 
     "download_binance_klines.py": """
   Options:
-    --days N                Number of days to download (default: 10)
-    --symbol SYMBOL         Trading pair symbol (default: BTCUSDT)
-    --db PATH               Database path (default: binance_klines.db)
+    -d, --days N            Target days of history (default: 10)
+    -s, --symbol SYMBOL     Trading pair symbol (default: BTCUSDT)
+    -i, --interval INT      Kline interval (default: 1m)
+    -c, --check             Check for gaps only (no download)
+    -f, --force             Force re-download all dates (not incremental)
 
   Examples:
-    (no args)               Download last 10 days
-    --days 100              Download last 100 days
-    --days 1000             Download last 1000 days""",
+    (no args)               Incremental update, fill gaps
+    -c                      Check coverage and gaps
+    -d 100                  Ensure 100 days of history
+    -d 1000 -f              Force re-download 1000 days
+    -s ETHUSDT -d 30        30 days of ETH data""",
 }
 
 
