@@ -576,8 +576,9 @@ async def main() -> int:
         print("")
         print("Examples:")
         print("  -n                    Dry run (no real orders)")
-        print("  -b 10 -t 0.8          $10 bet at 80% threshold")
-        print("  -n -b 5 -t 0.7        Dry run, $5 at 70%")
+        print("  -b 10                 $10 bet (triggers at 79%)")
+        print("  -b 5 -t 0.9           $5 bet (triggers at 89%)")
+        print("  -n -b 5 -t 0.7        Dry run, $5 (triggers at 69%)")
         print("")
         print("Run with --help for all options.")
         return 1
