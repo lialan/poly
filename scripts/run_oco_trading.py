@@ -570,6 +570,18 @@ async def run_single_epoch(api: PolymarketAPI, asset: Asset, horizon: MarketHori
 
 
 async def main() -> int:
+    # Require at least one argument to prevent accidental runs
+    if len(sys.argv) == 1:
+        print("Usage: run_oco_trading.py [OPTIONS]")
+        print("")
+        print("Examples:")
+        print("  -n                    Dry run (no real orders)")
+        print("  -b 10 -t 0.8          $10 bet at 80% threshold")
+        print("  -n -b 5 -t 0.7        Dry run, $5 at 70%")
+        print("")
+        print("Run with --help for all options.")
+        return 1
+
     args = parse_args()
     size = args.bet / args.threshold
     asset = Asset.BTC if args.asset == "btc" else Asset.ETH
