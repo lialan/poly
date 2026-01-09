@@ -1628,6 +1628,109 @@ class PolymarketAPI:
             time_in_force=time_in_force,
         )
 
+    async def place_market_order(
+        self,
+        token_id: str,
+        side: OrderSide,
+        amount: float,
+    ) -> OrderResult:
+        """Place a market order (Fill or Kill).
+
+        Market orders execute immediately at the best available price or fail.
+        For SELL orders, 'amount' is the number of shares to sell.
+        For BUY orders, 'amount' is the USD amount to spend.
+
+        Args:
+            token_id: The token ID to trade
+            side: BUY or SELL
+            amount: For SELL: number of shares. For BUY: USD amount.
+
+        Returns:
+            OrderResult with order_id, timing info, and status
+
+        Raises:
+            TradingNotConfiguredError: If trading credentials not configured
+        """
+        start_time = time.time()
+
+        try:
+            self._ensure_trading_configured()
+
+            loop = asyncio.get_running_loop()
+            order_id = await loop.run_in_executor(
+                None,
+                self._place_market_order_sync,
+                token_id,
+                side,
+                amount,
+            )
+
+            submission_time_ms = (time.time() - start_time) * 1000
+
+            return OrderResult.from_success(
+                order_id=order_id,
+                token_id=token_id,
+                side=side,
+                price=0.0,  # Market orders don't have a fixed price
+                size=amount,
+                time_in_force=OrderTimeInForce.FOK,
+                submission_time_ms=submission_time_ms,
+            )
+
+        except TradingNotConfiguredError:
+            raise
+        except Exception as e:
+            submission_time_ms = (time.time() - start_time) * 1000
+            return OrderResult.from_error(
+                error_message=str(e),
+                token_id=token_id,
+                side=side,
+                price=0.0,
+                size=amount,
+                time_in_force=OrderTimeInForce.FOK,
+                submission_time_ms=submission_time_ms,
+            )
+
+    def _place_market_order_sync(
+        self,
+        token_id: str,
+        side: OrderSide,
+        amount: float,
+    ) -> str:
+        """Synchronous market order placement (runs in executor).
+
+        Uses py-clob-client's create_market_order for FOK execution.
+
+        Returns:
+            order_id from CLOB response
+
+        Raises:
+            TradingError: If order placement fails
+        """
+        from py_clob_client.clob_types import MarketOrderArgs
+        from py_clob_client.order_builder.constants import BUY, SELL
+
+        client = self._get_clob_client()
+        clob_side = BUY if side == OrderSide.BUY else SELL
+
+        # Create market order args
+        order_args = MarketOrderArgs(
+            token_id=token_id,
+            amount=amount,
+            side=clob_side,
+        )
+
+        # Create and post market order
+        order = client.create_market_order(order_args)
+        response = client.post_order(order)
+
+        # Extract order ID from response
+        order_id = response.get("orderID") or response.get("order_id")
+        if not order_id:
+            raise TradingError(f"No order ID in response: {response}")
+
+        return order_id
+
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel an order.
 

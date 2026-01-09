@@ -163,31 +163,35 @@ async def sell_position(api: PolymarketAPI, pos, price: float = None, market_ord
         api: Polymarket API client
         pos: MarketPosition object
         price: Limit price (None = use best bid, ignored if market_order=True)
-        market_order: If True, use aggressive price (0.01) to fill immediately
+        market_order: If True, use FOK market order for immediate execution
 
     Returns:
         True if order placed successfully
     """
     try:
         if market_order:
-            # Market order: use minimum price to ensure immediate fill
-            price = 0.01
-            print(f"    Market order at {price:.2f} (will fill at best bid)")
-        elif price is None:
+            # Use proper market order API (FOK - Fill or Kill)
+            print(f"    Market sell {pos.size:.2f} shares (FOK)")
+            result = await api.place_market_order(
+                token_id=pos.asset,
+                side=OrderSide.SELL,
+                amount=pos.size,
+            )
+        else:
             # Limit order at best bid
-            price = await get_orderbook_price(api, pos.asset, "bid")
-            if price <= 0:
-                print(f"    [ERROR] No bids available for {pos.outcome}")
-                return False
-            print(f"    Using best bid: {price:.4f}")
+            if price is None:
+                price = await get_orderbook_price(api, pos.asset, "bid")
+                if price <= 0:
+                    print(f"    [ERROR] No bids available for {pos.outcome}")
+                    return False
+                print(f"    Using best bid: {price:.4f}")
 
-        # Place sell order
-        result = await api.place_order(
-            token_id=pos.asset,
-            side=OrderSide.SELL,
-            price=price,
-            size=pos.size,
-        )
+            result = await api.place_order(
+                token_id=pos.asset,
+                side=OrderSide.SELL,
+                price=price,
+                size=pos.size,
+            )
 
         if result.success:
             print(f"    [OK] Sell order placed: {result.order_id}")
