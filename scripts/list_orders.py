@@ -156,20 +156,25 @@ async def get_orderbook_price(api: PolymarketAPI, token_id: str, side: str) -> f
     return 0.0
 
 
-async def sell_position(api: PolymarketAPI, pos, price: float = None) -> bool:
+async def sell_position(api: PolymarketAPI, pos, price: float = None, market_order: bool = False) -> bool:
     """Sell all shares of a position.
 
     Args:
         api: Polymarket API client
         pos: MarketPosition object
-        price: Limit price (None = use best bid)
+        price: Limit price (None = use best bid, ignored if market_order=True)
+        market_order: If True, use aggressive price (0.01) to fill immediately
 
     Returns:
         True if order placed successfully
     """
     try:
-        # Get best bid if no price specified
-        if price is None:
+        if market_order:
+            # Market order: use minimum price to ensure immediate fill
+            price = 0.01
+            print(f"    Market order at {price:.2f} (will fill at best bid)")
+        elif price is None:
+            # Limit order at best bid
             price = await get_orderbook_price(api, pos.asset, "bid")
             if price <= 0:
                 print(f"    [ERROR] No bids available for {pos.outcome}")
@@ -210,7 +215,7 @@ async def interactive_sell(api: PolymarketAPI, positions: list) -> int:
         print("\nNo positions to sell.")
         return 0
 
-    print("\nEnter position number to sell (or 'q' to quit, 'a' to sell all at best bid):")
+    print("\nEnter position number to sell (or 'q' to quit, 'a' to sell all as market order):")
 
     sold = 0
     while True:
@@ -224,10 +229,10 @@ async def interactive_sell(api: PolymarketAPI, positions: list) -> int:
             break
 
         if choice == "a":
-            print("\nSelling all positions at best bid...")
+            print("\nSelling all positions as market orders...")
             for pos in positions:
                 print(f"  Selling {pos.size:.2f} {pos.outcome} shares of {pos.title[:30]}...")
-                if await sell_position(api, pos):
+                if await sell_position(api, pos, market_order=True):
                     sold += 1
             break
 
