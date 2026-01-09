@@ -52,6 +52,7 @@ from poly import (
     Asset,
     MarketHorizon,
     get_slot_timestamp,
+    slug_to_timestamp,
 )
 
 # Polygon contract addresses for balance/allowance checks
@@ -125,6 +126,13 @@ def parse_args():
         action="store_true",
         help="Run for single epoch only (don't loop)",
     )
+    parser.add_argument(
+        "-i", "--ignore-first-seconds",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Ignore triggers for the first N seconds of each epoch (default: 0)",
+    )
     return parser.parse_args()
 
 
@@ -194,6 +202,7 @@ async def monitor_and_trade(
     size: float,
     dry_run: bool = False,
     wait_for_resolution: bool = True,
+    ignore_first_seconds: int = 0,
 ) -> dict:
     """Monitor prices via WebSocket and place order when threshold is reached.
 
@@ -240,7 +249,11 @@ async def monitor_and_trade(
     # Result container
     result: dict = {"market_slug": market.slug, "success": False}
     threshold_decimal = Decimal(str(threshold))
-    start_time = asyncio.get_event_loop().time()
+
+    # Use epoch start time (from slug) for ignore period calculation
+    epoch_start_ts = slug_to_timestamp(market.slug)
+    if epoch_start_ts is None:
+        epoch_start_ts = int(time.time())  # Fallback to now
 
     # Create an event to signal when threshold is reached
     triggered = asyncio.Event()
@@ -260,8 +273,15 @@ async def monitor_and_trade(
         if not up_price or not down_price:
             return
 
-        elapsed = asyncio.get_event_loop().time() - start_time
-        print(f"  [{elapsed:6.1f}s] UP: {float(up_price):.3f} | DOWN: {float(down_price):.3f}", end="\r")
+        # Calculate elapsed time since epoch start (not script start)
+        elapsed_since_epoch = int(time.time()) - epoch_start_ts
+
+        # Show status with ignore indicator if in ignore period
+        if elapsed_since_epoch < ignore_first_seconds:
+            print(f"  [{elapsed_since_epoch:4d}s] UP: {float(up_price):.3f} | DOWN: {float(down_price):.3f} (ignoring until {ignore_first_seconds}s)", end="\r")
+            return  # Don't trigger during ignore period
+
+        print(f"  [{elapsed_since_epoch:4d}s] UP: {float(up_price):.3f} | DOWN: {float(down_price):.3f}", end="\r")
 
         # Trigger at threshold - 0.01 (e.g., 0.79 for 0.8 threshold)
         trigger_level = threshold_decimal - Decimal("0.01")
@@ -304,7 +324,7 @@ async def monitor_and_trade(
         side = result["triggered_side"]
         price = result["trigger_price"]
 
-        print(f"\n\n[TRIGGER] {side} reached {price:.3f} >= {threshold}!")
+        print(f"\n\n[TRIGGER] {side} reached {price:.3f} >= {threshold - 0.01:.2f}!")
 
         if dry_run:
             print(f"    [DRY RUN] Would place BUY {side} order")
@@ -401,55 +421,6 @@ async def monitor_and_trade(
     return result
 
 
-def interactive_config() -> dict:
-    """Interactive configuration when run without arguments."""
-    print("\n" + "=" * 50)
-    print("EXTREME THRESHOLD TRADING - SETUP")
-    print("=" * 50)
-    print("\nThis strategy monitors prices and places a bet when")
-    print("the market shows strong conviction (reaches threshold).")
-
-    # Bet amount
-    while True:
-        bet_str = input("\nBet amount in USD [5]: ").strip() or "5"
-        try:
-            bet = float(bet_str)
-            if bet < 4:
-                print("Minimum bet is ~$4 (5 shares minimum)")
-                continue
-            break
-        except ValueError:
-            print("Enter a valid number")
-
-    # Asset
-    asset_str = input("Asset (btc/eth) [btc]: ").strip().lower() or "btc"
-    if asset_str not in ("btc", "eth"):
-        asset_str = "btc"
-
-    # Threshold
-    while True:
-        thresh_str = input("Threshold % (50-95) [80]: ").strip() or "80"
-        try:
-            threshold_pct = float(thresh_str)
-            if not 50 <= threshold_pct <= 95:
-                print("Threshold must be between 50 and 95")
-                continue
-            threshold = threshold_pct / 100.0
-            break
-        except ValueError:
-            print("Enter a valid number")
-
-    # Dry run?
-    dry_run = input("Dry run (no real orders)? (y/N): ").strip().lower() == "y"
-
-    return {
-        "bet": bet,
-        "asset": asset_str,
-        "threshold": threshold,
-        "dry_run": dry_run,
-    }
-
-
 async def run_single_epoch(
     api: PolymarketAPI,
     asset: Asset,
@@ -458,6 +429,7 @@ async def run_single_epoch(
     size: float,
     dry_run: bool,
     wait_for_resolution: bool,
+    ignore_first_seconds: int = 0,
 ) -> dict:
     """Run the strategy for a single epoch.
 
@@ -472,6 +444,7 @@ async def run_single_epoch(
         size=size,
         dry_run=dry_run,
         wait_for_resolution=wait_for_resolution,
+        ignore_first_seconds=ignore_first_seconds,
     )
 
     # Print epoch summary
@@ -500,24 +473,6 @@ async def run_single_epoch(
 async def main() -> int:
     args = parse_args()
 
-    # Interactive mode if run without arguments (check if all defaults)
-    if args.bet == 5.0 and args.threshold == 0.8 and not args.dry_run:
-        # Looks like defaults - offer interactive config
-        try:
-            response = input("\nRun with defaults ($5, 80% threshold)? (Y/n): ").strip().lower()
-            if response == "n":
-                config = interactive_config()
-                if config is None:
-                    print("Cancelled.")
-                    return 0
-                args.bet = config["bet"]
-                args.asset = config["asset"]
-                args.threshold = config["threshold"]
-                args.dry_run = config["dry_run"]
-        except (EOFError, KeyboardInterrupt):
-            # Non-interactive mode, use defaults
-            pass
-
     # Calculate size from bet amount
     size = args.bet / args.threshold
 
@@ -537,6 +492,8 @@ async def main() -> int:
     print(f"  Dry run:    {args.dry_run}")
     print(f"  Wait:       {'Yes' if not args.no_wait else 'No'}")
     print(f"  Mode:       {'Continuous loop' if loop_mode else 'Single epoch'}")
+    if args.ignore_first_seconds > 0:
+        print(f"  Ignore:     First {args.ignore_first_seconds}s of each epoch")
 
     # Load credentials (unless dry run)
     poly_config = None
@@ -587,6 +544,7 @@ async def main() -> int:
                     size=size,
                     dry_run=args.dry_run,
                     wait_for_resolution=not args.no_wait,
+                    ignore_first_seconds=args.ignore_first_seconds,
                 )
 
                 # Track results
