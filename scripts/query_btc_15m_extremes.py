@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import math
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
@@ -41,6 +42,13 @@ class MarketAnalysis:
     max_prob: float
     first_extreme_time: float | None
     final_time: float | None
+    # BTC price analysis
+    start_price: float | None
+    threshold_price: float | None
+    log_price_delta: float | None  # log(threshold_price) - log(start_price)
+    # Time analysis
+    start_time: float | None
+    time_to_threshold: float | None  # seconds from market start to threshold hit
 
 
 def get_yes_mid_price(orderbook_json: str) -> float | None:
@@ -77,15 +85,16 @@ def analyze_market(snapshots: list[dict], threshold: float) -> MarketAnalysis:
     # Sort by timestamp (oldest first)
     sorted_snaps = sorted(snapshots, key=lambda x: x.get("ts", 0))
 
-    # Track probability over time
-    probs = []
+    # Track probability and price over time
+    data_points = []  # [(ts, prob, spot_price), ...]
     for snap in sorted_snaps:
         orderbook = snap.get("orderbook", "{}")
         prob = get_yes_mid_price(orderbook)
+        spot_price = snap.get("spot_price", 0)
         if prob is not None:
-            probs.append((snap.get("ts", 0), prob))
+            data_points.append((snap.get("ts", 0), prob, spot_price))
 
-    if not probs:
+    if not data_points:
         return MarketAnalysis(
             market_id=market_id,
             snapshots=len(snapshots),
@@ -95,28 +104,49 @@ def analyze_market(snapshots: list[dict], threshold: float) -> MarketAnalysis:
             max_prob=0,
             first_extreme_time=None,
             final_time=None,
+            start_price=None,
+            threshold_price=None,
+            log_price_delta=None,
+            start_time=None,
+            time_to_threshold=None,
         )
+
+    # Get start time and price
+    start_time = data_points[0][0]
+    start_price = data_points[0][2] if data_points[0][2] > 0 else None
 
     # Calculate thresholds from input percentage
     HIGH_THRESHOLD = (100 - threshold) / 100  # e.g., 15 -> 0.85
     LOW_THRESHOLD = threshold / 100            # e.g., 15 -> 0.15
 
-    # Find first extreme
+    # Find first extreme and price at that point
     first_extreme = None
     first_extreme_time = None
+    threshold_price = None
 
-    for ts, prob in probs:
+    for ts, prob, price in data_points:
         if prob >= HIGH_THRESHOLD:
             first_extreme = "high"
             first_extreme_time = ts
+            threshold_price = price if price > 0 else None
             break
         elif prob <= LOW_THRESHOLD:
             first_extreme = "low"
             first_extreme_time = ts
+            threshold_price = price if price > 0 else None
             break
 
+    # Calculate log price delta and time to threshold
+    log_price_delta = None
+    if start_price and threshold_price and start_price > 0 and threshold_price > 0:
+        log_price_delta = math.log(threshold_price) - math.log(start_price)
+
+    time_to_threshold = None
+    if first_extreme_time and start_time:
+        time_to_threshold = first_extreme_time - start_time
+
     # Determine final outcome from last snapshot
-    final_ts, final_prob = probs[-1]
+    final_ts, final_prob, _ = data_points[-1]
     final_outcome = None
 
     # Consider 95%+ as UP won, 5%- as DOWN won
@@ -128,8 +158,8 @@ def analyze_market(snapshots: list[dict], threshold: float) -> MarketAnalysis:
     elif final_prob <= FINAL_LOW:
         final_outcome = "down"
 
-    min_prob = min(p for _, p in probs)
-    max_prob = max(p for _, p in probs)
+    min_prob = min(p for _, p, _ in data_points)
+    max_prob = max(p for _, p, _ in data_points)
 
     return MarketAnalysis(
         market_id=market_id,
@@ -140,6 +170,11 @@ def analyze_market(snapshots: list[dict], threshold: float) -> MarketAnalysis:
         max_prob=max_prob,
         first_extreme_time=first_extreme_time,
         final_time=final_ts,
+        start_price=start_price,
+        threshold_price=threshold_price,
+        log_price_delta=log_price_delta,
+        start_time=start_time,
+        time_to_threshold=time_to_threshold,
     )
 
 
@@ -176,6 +211,7 @@ def query_all_markets(
             "ts": float(get_val(b"ts") or 0),
             "market_id": market_id,
             "orderbook": get_val(b"orderbook") or "{}",
+            "spot_price": float(get_val(b"spot_price") or 0),
         }
 
         markets[market_id].append(snap)
@@ -275,6 +311,57 @@ Examples:
             print(f"\n  P(UP wins | hit {high_pct:.0f}% first) = {prob:.1f}%")
             print(f"  (Based on {resolved_high} resolved markets)")
 
+        # Log price delta for correctly predicted (hit high -> UP won)
+        deltas = [a.log_price_delta for a in hit_high_then_up if a.log_price_delta is not None]
+        if deltas:
+            print(f"\n  Log(price) delta when threshold hit (CORRECT predictions):")
+            print(f"    Count:  {len(deltas)}")
+            print(f"    Min:    {min(deltas)*100:+.4f}%")
+            print(f"    Max:    {max(deltas)*100:+.4f}%")
+            print(f"    Mean:   {sum(deltas)/len(deltas)*100:+.4f}%")
+            sorted_deltas = sorted(deltas)
+            median = sorted_deltas[len(sorted_deltas)//2]
+            print(f"    Median: {median*100:+.4f}%")
+
+        # Time to threshold for correctly predicted
+        times = [a.time_to_threshold for a in hit_high_then_up if a.time_to_threshold is not None]
+        if times:
+            print(f"\n  Time to threshold (CORRECT predictions):")
+            print(f"    Count:  {len(times)}")
+            print(f"    Min:    {min(times):.1f}s")
+            print(f"    Max:    {max(times):.1f}s")
+            print(f"    Mean:   {sum(times)/len(times):.1f}s")
+            sorted_times = sorted(times)
+            median = sorted_times[len(sorted_times)//2]
+            print(f"    Median: {median:.1f}s")
+            # Distribution buckets (0-3min, 3-6min, 6-9min, 9-12min, 12-15min)
+            buckets = [0, 0, 0, 0, 0]
+            for t in times:
+                idx = min(int(t // 180), 4)
+                buckets[idx] += 1
+            print(f"    Distribution:")
+            print(f"      0-3min:   {buckets[0]:3d} ({buckets[0]/len(times)*100:5.1f}%)")
+            print(f"      3-6min:   {buckets[1]:3d} ({buckets[1]/len(times)*100:5.1f}%)")
+            print(f"      6-9min:   {buckets[2]:3d} ({buckets[2]/len(times)*100:5.1f}%)")
+            print(f"      9-12min:  {buckets[3]:3d} ({buckets[3]/len(times)*100:5.1f}%)")
+            print(f"      12-15min: {buckets[4]:3d} ({buckets[4]/len(times)*100:5.1f}%)")
+
+        # Log price delta for incorrectly predicted (hit high -> DOWN won)
+        deltas_wrong = [a.log_price_delta for a in hit_high_then_down if a.log_price_delta is not None]
+        if deltas_wrong:
+            print(f"\n  Log(price) delta when threshold hit (FAILED predictions):")
+            print(f"    Count:  {len(deltas_wrong)}")
+            print(f"    Min:    {min(deltas_wrong)*100:+.4f}%")
+            print(f"    Max:    {max(deltas_wrong)*100:+.4f}%")
+            print(f"    Mean:   {sum(deltas_wrong)/len(deltas_wrong)*100:+.4f}%")
+            sorted_deltas = sorted(deltas_wrong)
+            median = sorted_deltas[len(sorted_deltas)//2]
+            print(f"    Median: {median*100:+.4f}%")
+            print(f"    Failed markets:")
+            for a in hit_high_then_down:
+                delta_str = f"{a.log_price_delta*100:+.4f}%" if a.log_price_delta else "N/A"
+                print(f"      {a.market_id} (delta: {delta_str})")
+
     print()
 
     # Question 2: P(DOWN wins | hit low% first)
@@ -290,6 +377,57 @@ Examples:
             prob = len(hit_low_then_down) / resolved_low * 100
             print(f"\n  P(DOWN wins | hit {low_pct:.0f}% first) = {prob:.1f}%")
             print(f"  (Based on {resolved_low} resolved markets)")
+
+        # Log price delta for correctly predicted (hit low -> DOWN won)
+        deltas = [a.log_price_delta for a in hit_low_then_down if a.log_price_delta is not None]
+        if deltas:
+            print(f"\n  Log(price) delta when threshold hit (CORRECT predictions):")
+            print(f"    Count:  {len(deltas)}")
+            print(f"    Min:    {min(deltas)*100:+.4f}%")
+            print(f"    Max:    {max(deltas)*100:+.4f}%")
+            print(f"    Mean:   {sum(deltas)/len(deltas)*100:+.4f}%")
+            sorted_deltas = sorted(deltas)
+            median = sorted_deltas[len(sorted_deltas)//2]
+            print(f"    Median: {median*100:+.4f}%")
+
+        # Time to threshold for correctly predicted
+        times = [a.time_to_threshold for a in hit_low_then_down if a.time_to_threshold is not None]
+        if times:
+            print(f"\n  Time to threshold (CORRECT predictions):")
+            print(f"    Count:  {len(times)}")
+            print(f"    Min:    {min(times):.1f}s")
+            print(f"    Max:    {max(times):.1f}s")
+            print(f"    Mean:   {sum(times)/len(times):.1f}s")
+            sorted_times = sorted(times)
+            median = sorted_times[len(sorted_times)//2]
+            print(f"    Median: {median:.1f}s")
+            # Distribution buckets (0-3min, 3-6min, 6-9min, 9-12min, 12-15min)
+            buckets = [0, 0, 0, 0, 0]
+            for t in times:
+                idx = min(int(t // 180), 4)
+                buckets[idx] += 1
+            print(f"    Distribution:")
+            print(f"      0-3min:   {buckets[0]:3d} ({buckets[0]/len(times)*100:5.1f}%)")
+            print(f"      3-6min:   {buckets[1]:3d} ({buckets[1]/len(times)*100:5.1f}%)")
+            print(f"      6-9min:   {buckets[2]:3d} ({buckets[2]/len(times)*100:5.1f}%)")
+            print(f"      9-12min:  {buckets[3]:3d} ({buckets[3]/len(times)*100:5.1f}%)")
+            print(f"      12-15min: {buckets[4]:3d} ({buckets[4]/len(times)*100:5.1f}%)")
+
+        # Log price delta for incorrectly predicted (hit low -> UP won)
+        deltas_wrong = [a.log_price_delta for a in hit_low_then_up if a.log_price_delta is not None]
+        if deltas_wrong:
+            print(f"\n  Log(price) delta when threshold hit (FAILED predictions):")
+            print(f"    Count:  {len(deltas_wrong)}")
+            print(f"    Min:    {min(deltas_wrong)*100:+.4f}%")
+            print(f"    Max:    {max(deltas_wrong)*100:+.4f}%")
+            print(f"    Mean:   {sum(deltas_wrong)/len(deltas_wrong)*100:+.4f}%")
+            sorted_deltas = sorted(deltas_wrong)
+            median = sorted_deltas[len(sorted_deltas)//2]
+            print(f"    Median: {median*100:+.4f}%")
+            print(f"    Failed markets:")
+            for a in hit_low_then_up:
+                delta_str = f"{a.log_price_delta*100:+.4f}%" if a.log_price_delta else "N/A"
+                print(f"      {a.market_id} (delta: {delta_str})")
 
     print()
 
