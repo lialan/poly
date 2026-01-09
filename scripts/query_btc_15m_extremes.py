@@ -323,28 +323,33 @@ Examples:
             median = sorted_deltas[len(sorted_deltas)//2]
             print(f"    Median: {median*100:+.4f}%")
 
-        # Time to threshold for correctly predicted
-        times = [a.time_to_threshold for a in hit_high_then_up if a.time_to_threshold is not None]
-        if times:
+        # Time to threshold analysis (all resolved markets that hit high first)
+        resolved_high_markets = hit_high_then_up + hit_high_then_down
+        times_all = [(a.time_to_threshold, a.final_outcome == "up") for a in resolved_high_markets if a.time_to_threshold is not None]
+        times_correct = [a.time_to_threshold for a in hit_high_then_up if a.time_to_threshold is not None]
+        if times_correct:
             print(f"\n  Time to threshold (CORRECT predictions):")
-            print(f"    Count:  {len(times)}")
-            print(f"    Min:    {min(times):.1f}s")
-            print(f"    Max:    {max(times):.1f}s")
-            print(f"    Mean:   {sum(times)/len(times):.1f}s")
-            sorted_times = sorted(times)
+            print(f"    Count:  {len(times_correct)}")
+            print(f"    Min:    {min(times_correct):.1f}s")
+            print(f"    Max:    {max(times_correct):.1f}s")
+            print(f"    Mean:   {sum(times_correct)/len(times_correct):.1f}s")
+            sorted_times = sorted(times_correct)
             median = sorted_times[len(sorted_times)//2]
             print(f"    Median: {median:.1f}s")
-            # Distribution buckets (0-3min, 3-6min, 6-9min, 9-12min, 12-15min)
-            buckets = [0, 0, 0, 0, 0]
-            for t in times:
+            # Distribution buckets with success rate (0-3min, 3-6min, 6-9min, 9-12min, 12-15min)
+            buckets_correct = [0, 0, 0, 0, 0]
+            buckets_total = [0, 0, 0, 0, 0]
+            for t in times_correct:
                 idx = min(int(t // 180), 4)
-                buckets[idx] += 1
-            print(f"    Distribution:")
-            print(f"      0-3min:   {buckets[0]:3d} ({buckets[0]/len(times)*100:5.1f}%)")
-            print(f"      3-6min:   {buckets[1]:3d} ({buckets[1]/len(times)*100:5.1f}%)")
-            print(f"      6-9min:   {buckets[2]:3d} ({buckets[2]/len(times)*100:5.1f}%)")
-            print(f"      9-12min:  {buckets[3]:3d} ({buckets[3]/len(times)*100:5.1f}%)")
-            print(f"      12-15min: {buckets[4]:3d} ({buckets[4]/len(times)*100:5.1f}%)")
+                buckets_correct[idx] += 1
+            for t, is_correct in times_all:
+                idx = min(int(t // 180), 4)
+                buckets_total[idx] += 1
+            print(f"    Distribution (with success rate):")
+            for i, label in enumerate(["0-3min", "3-6min", "6-9min", "9-12min", "12-15min"]):
+                pct = buckets_correct[i]/len(times_correct)*100 if times_correct else 0
+                success_rate = buckets_correct[i]/buckets_total[i]*100 if buckets_total[i] > 0 else 0
+                print(f"      {label:8s} {buckets_correct[i]:3d} ({pct:5.1f}%) | P(success): {success_rate:5.1f}% ({buckets_correct[i]}/{buckets_total[i]})")
 
         # Log price delta for incorrectly predicted (hit high -> DOWN won)
         deltas_wrong = [a.log_price_delta for a in hit_high_then_down if a.log_price_delta is not None]
@@ -390,28 +395,33 @@ Examples:
             median = sorted_deltas[len(sorted_deltas)//2]
             print(f"    Median: {median*100:+.4f}%")
 
-        # Time to threshold for correctly predicted
-        times = [a.time_to_threshold for a in hit_low_then_down if a.time_to_threshold is not None]
-        if times:
+        # Time to threshold analysis (all resolved markets that hit low first)
+        resolved_low_markets = hit_low_then_down + hit_low_then_up
+        times_all = [(a.time_to_threshold, a.final_outcome == "down") for a in resolved_low_markets if a.time_to_threshold is not None]
+        times_correct = [a.time_to_threshold for a in hit_low_then_down if a.time_to_threshold is not None]
+        if times_correct:
             print(f"\n  Time to threshold (CORRECT predictions):")
-            print(f"    Count:  {len(times)}")
-            print(f"    Min:    {min(times):.1f}s")
-            print(f"    Max:    {max(times):.1f}s")
-            print(f"    Mean:   {sum(times)/len(times):.1f}s")
-            sorted_times = sorted(times)
+            print(f"    Count:  {len(times_correct)}")
+            print(f"    Min:    {min(times_correct):.1f}s")
+            print(f"    Max:    {max(times_correct):.1f}s")
+            print(f"    Mean:   {sum(times_correct)/len(times_correct):.1f}s")
+            sorted_times = sorted(times_correct)
             median = sorted_times[len(sorted_times)//2]
             print(f"    Median: {median:.1f}s")
-            # Distribution buckets (0-3min, 3-6min, 6-9min, 9-12min, 12-15min)
-            buckets = [0, 0, 0, 0, 0]
-            for t in times:
+            # Distribution buckets with success rate (0-3min, 3-6min, 6-9min, 9-12min, 12-15min)
+            buckets_correct = [0, 0, 0, 0, 0]
+            buckets_total = [0, 0, 0, 0, 0]
+            for t in times_correct:
                 idx = min(int(t // 180), 4)
-                buckets[idx] += 1
-            print(f"    Distribution:")
-            print(f"      0-3min:   {buckets[0]:3d} ({buckets[0]/len(times)*100:5.1f}%)")
-            print(f"      3-6min:   {buckets[1]:3d} ({buckets[1]/len(times)*100:5.1f}%)")
-            print(f"      6-9min:   {buckets[2]:3d} ({buckets[2]/len(times)*100:5.1f}%)")
-            print(f"      9-12min:  {buckets[3]:3d} ({buckets[3]/len(times)*100:5.1f}%)")
-            print(f"      12-15min: {buckets[4]:3d} ({buckets[4]/len(times)*100:5.1f}%)")
+                buckets_correct[idx] += 1
+            for t, is_correct in times_all:
+                idx = min(int(t // 180), 4)
+                buckets_total[idx] += 1
+            print(f"    Distribution (with success rate):")
+            for i, label in enumerate(["0-3min", "3-6min", "6-9min", "9-12min", "12-15min"]):
+                pct = buckets_correct[i]/len(times_correct)*100 if times_correct else 0
+                success_rate = buckets_correct[i]/buckets_total[i]*100 if buckets_total[i] > 0 else 0
+                print(f"      {label:8s} {buckets_correct[i]:3d} ({pct:5.1f}%) | P(success): {success_rate:5.1f}% ({buckets_correct[i]}/{buckets_total[i]})")
 
         # Log price delta for incorrectly predicted (hit low -> UP won)
         deltas_wrong = [a.log_price_delta for a in hit_low_then_up if a.log_price_delta is not None]
