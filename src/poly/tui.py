@@ -85,6 +85,16 @@ SCRIPT_OPTIONS = {
     "btc_15m_backtest.py": """
   Options: (none - runs with all available data)""",
 
+    "query_btc_15m_extremes.py": """
+  Options:
+    -t, --threshold N       Threshold % (default: 10)
+                            High = 100-N, Low = N
+
+  Examples:
+    (no args)               90% high / 10% low thresholds
+    -t 15                   85% high / 15% low thresholds
+    -t 20                   80% high / 20% low thresholds""",
+
     "run_trading_bot.py": """
   Options:
     --asset btc|eth         Asset to trade (default: btc)
@@ -285,7 +295,7 @@ def main():
 
         # Build main menu options
         main_options = []
-        category_order = ["trading", "manual_trade", "query", "test", "simulation", "collector", "utility"]
+        category_order = ["trading", "manual_trade", "query", "backtest", "test", "simulation", "collector", "utility"]
 
         for cat in category_order:
             if cat in by_category:

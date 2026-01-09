@@ -26,6 +26,7 @@ CATEGORIES = {
     "trading": "Trading Bots",
     "manual_trade": "Manual Trade",
     "query": "Queries",
+    "backtest": "Backtest",
     "test": "Tests",
     "simulation": "Simulations",
     "collector": "Collectors",
@@ -37,14 +38,17 @@ def categorize(filename: str) -> str:
     """Categorize script by naming convention."""
     name = filename.lower()
 
-    # Check simulation first (backtest takes priority over trading)
-    if any(p in name for p in ["simulation", "backtest", "simulate"]):
+    # Backtest scripts (historical analysis)
+    if any(p in name for p in ["backtest", "extremes"]):
+        return "backtest"
+    # Simulation scripts
+    if any(p in name for p in ["simulation", "simulate"]):
         return "simulation"
     # Manual trade scripts (bet_*.py, approve_*.py, check_balance, redeem_positions)
     if name.startswith("bet_") or name.startswith("approve_") or name.startswith("redeem_") or name == "check_balance.py":
         return "manual_trade"
-    # Query scripts (query_*.py)
-    if name.startswith("query_"):
+    # Query scripts (query_*.py) - but not extremes analysis
+    if name.startswith("query_") and "extremes" not in name:
         return "query"
     if any(p in name for p in ["_bot", "_trader", "trading", "trade_"]):
         return "trading"
