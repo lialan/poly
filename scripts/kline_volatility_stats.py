@@ -1,18 +1,78 @@
 #!/usr/bin/env python3
 """
-Calculate volatility statistics from rolling N-minute klines using log returns.
+Kline Volatility Statistics - Log Return Analysis
+==================================================
 
+Calculates volatility statistics from rolling N-minute klines using log returns.
 Generates rolling klines on-the-fly from 1-minute data with configurable window.
 
-Volatility metrics:
-1. Intra-candle range: log(high/low) - price range within each candle
-2. Close-to-close return: log(close_t / close_{t-1}) - return between candles
-3. Open-to-close return: log(close/open) - directional move within candle
+METRICS COMPUTED
+----------------
 
-Usage:
+1. RANGE METRICS (always positive):
+
+   log(H/L)  - Intra-candle range
+              Total price movement within the candle.
+              Measures overall volatility regardless of direction.
+
+2. RETURN METRICS (can be positive or negative):
+
+   log(C/O)  - Open-to-close return
+              Directional move from open to close.
+              Positive = bullish candle, Negative = bearish candle.
+
+   log(Ct/Ct-1) - Close-to-close return
+              Return between consecutive candles.
+              Standard return measure for time series analysis.
+
+3. EXTREME METRICS (distance from open to extremes):
+
+   log(O/H)  - Open-to-high (always <= 0 since H >= O)
+              How far price rose above open.
+
+   log(O/L)  - Open-to-low (always >= 0 since O >= L)
+              How far price fell below open.
+
+   KEY RELATIONSHIP:
+   log(H/L) = |log(O/H)| + |log(O/L)|
+
+   The total range equals the sum of upside and downside excursions from open.
+
+4. MAX EXCURSION:
+
+   MaxExcursion = max(|log(O/H)|, |log(O/L)|)
+
+   Maximum adverse move from open in either direction.
+   Use case: Worst-case drawdown for a position entered at open.
+
+INTERPRETATION
+--------------
+
+For a candle with O=100, H=103, L=98, C=101:
+
+   |log(O/H)| = log(103/100) = 0.030 (3.0% upside from open)
+   |log(O/L)| = log(100/98)  = 0.020 (2.0% downside from open)
+   log(H/L)   = log(103/98)  = 0.050 (5.0% total range)
+   log(C/O)   = log(101/100) = 0.010 (1.0% bullish close)
+   MaxExcursion = 0.030 (3.0% max move from open)
+
+   Note: 0.030 + 0.020 = 0.050 ✓ (range = upside + downside)
+
+USE CASES
+---------
+
+- log(H/L): Overall volatility measurement, option pricing
+- |log(C/O)|: Directional strength, trend analysis
+- |log(Ct/Ct-1)|: Standard volatility, risk metrics
+- |log(O/H)| vs |log(O/L)|: Asymmetry analysis (bullish vs bearish pressure)
+- MaxExcursion: Stop-loss sizing, worst-case risk for entries at open
+
+USAGE
+-----
+
     python scripts/kline_volatility_stats.py           # 3-minute (default)
-    python scripts/kline_volatility_stats.py -w 5      # 5-minute
-    python scripts/kline_volatility_stats.py -w 15     # 15-minute
+    python scripts/kline_volatility_stats.py -w 5      # 5-minute window
+    python scripts/kline_volatility_stats.py -w 15     # 15-minute window
     python scripts/kline_volatility_stats.py -s ETHUSDT -w 5
 """
 
