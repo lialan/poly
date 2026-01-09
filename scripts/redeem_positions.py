@@ -254,8 +254,8 @@ Examples:
         print("    No winning positions to redeem")
         return 0
 
-    # Sort alphabetically by slug
-    positions = sorted(winning_positions, key=lambda p: p.slug or p.condition_id)
+    # Sort alphabetically by slug (descending - newest first)
+    positions = sorted(winning_positions, key=lambda p: p.slug or p.condition_id, reverse=True)
     print(f"    Found {len(positions)} winning position(s) to redeem:")
     print()
 

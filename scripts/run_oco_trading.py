@@ -13,16 +13,12 @@ Strategy:
 4. Wait for market to resolve and report result
 5. Automatically restart for the next epoch
 
-This is a "momentum" strategy - betting that when the market shows strong
-conviction (80%+), it will likely be correct.
-
 The script runs continuously until:
 - Insufficient USDC balance for the next bet
 - Insufficient USDC allowance for the exchange
 - Manual interruption (Ctrl+C)
 
 Usage:
-    python scripts/run_oco_trading.py                  # Interactive mode
     python scripts/run_oco_trading.py --bet 5          # $5 bet, continuous mode
     python scripts/run_oco_trading.py --bet 10 --threshold 0.7  # $10 at 70%
     python scripts/run_oco_trading.py --asset eth      # Trade ETH instead
@@ -36,10 +32,14 @@ Requirements:
 
 import argparse
 import asyncio
+import math
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -54,8 +54,9 @@ from poly import (
     get_slot_timestamp,
     slug_to_timestamp,
 )
+from poly.api.binance_ws import BinanceKlineStream, BTCUSDT, ETHUSDT, INTERVAL_1M
 
-# Polygon contract addresses for balance/allowance checks
+# Polygon contract addresses
 USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 EXCHANGE_ADDRESS = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
 POLYGON_RPC_URLS = [
@@ -63,15 +64,11 @@ POLYGON_RPC_URLS = [
     "https://rpc-mainnet.matic.network",
 ]
 
-# ERC20 ABI (minimal for balance/allowance checks)
 ERC20_ABI = [
     {
         "name": "allowance",
         "type": "function",
-        "inputs": [
-            {"name": "owner", "type": "address"},
-            {"name": "spender", "type": "address"},
-        ],
+        "inputs": [{"name": "owner", "type": "address"}, {"name": "spender", "type": "address"}],
         "outputs": [{"name": "", "type": "uint256"}],
     },
     {
@@ -83,371 +80,123 @@ ERC20_ABI = [
 ]
 
 
+@dataclass
+class PriceState:
+    """Current price state from Binance."""
+    open_price: Optional[float] = None
+    close_price: Optional[float] = None
+
+    @property
+    def log_delta_pct(self) -> Optional[float]:
+        """Calculate log return as percentage."""
+        if self.open_price and self.close_price and self.open_price > 0:
+            return (math.log(self.close_price) - math.log(self.open_price)) * 100
+        return None
+
+    def format_display(self) -> str:
+        """Format price for status line display."""
+        if not self.close_price:
+            return "..."
+        delta = self.log_delta_pct
+        if delta is not None:
+            return f"${self.close_price:,.0f} ({delta:+.3f}%)"
+        return f"${self.close_price:,.0f}"
+
+
+@dataclass
+class TriggerInfo:
+    """Information captured at trigger time."""
+    side: str
+    token_id: str
+    trigger_price: float
+    elapsed_seconds: int
+    spot_price: Optional[float]
+    spot_open: Optional[float]
+    log_delta_pct: Optional[float]
+    up_bid: Optional[float]
+    up_ask: Optional[float]
+    down_bid: Optional[float]
+    down_ask: Optional[float]
+
+    def print_details(self, threshold: float):
+        """Print trigger details."""
+        print(f"\n\n[TRIGGER] {self.side} reached {self.trigger_price:.3f} >= {threshold - 0.01:.2f}!")
+        print(f"    Epoch time:  {self.elapsed_seconds}s")
+
+        if self.spot_price and self.log_delta_pct is not None:
+            print(f"    Spot price:  ${self.spot_price:,.2f} (open: ${self.spot_open:,.2f}, delta: {self.log_delta_pct:+.3f}%)")
+        elif self.spot_price:
+            print(f"    Spot price:  ${self.spot_price:,.2f}")
+        else:
+            print(f"    Spot price:  -")
+
+        up_bid_str = f"{self.up_bid:.3f}" if self.up_bid else "-"
+        up_ask_str = f"{self.up_ask:.3f}" if self.up_ask else "-"
+        down_bid_str = f"{self.down_bid:.3f}" if self.down_bid else "-"
+        down_ask_str = f"{self.down_ask:.3f}" if self.down_ask else "-"
+        print(f"    UP:   bid={up_bid_str} ask={up_ask_str}")
+        print(f"    DOWN: bid={down_bid_str} ask={down_ask_str}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Extreme threshold trading - bet when market shows conviction"
     )
-    parser.add_argument(
-        "--bet",
-        type=float,
-        default=5.0,
-        help="Bet amount in USD (default: 5.0, min ~$4 for 5 shares)",
-    )
-    parser.add_argument(
-        "--asset",
-        choices=["btc", "eth"],
-        default="btc",
-        help="Asset to trade (default: btc)",
-    )
-    parser.add_argument(
-        "--horizon",
-        choices=["15m", "1h", "4h", "d1"],
-        default="15m",
-        help="Market horizon (default: 15m)",
-    )
-    parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.8,
-        help="Trigger threshold 0.5-0.95 (default: 0.8 = 80%%)",
-    )
-    parser.add_argument(
-        "-n", "--dry-run",
-        action="store_true",
-        help="Simulate without placing real orders",
-    )
-    parser.add_argument(
-        "--no-wait",
-        action="store_true",
-        help="Exit after placing order (don't wait for market resolution)",
-    )
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Run for single epoch only (don't loop)",
-    )
-    parser.add_argument(
-        "-i", "--ignore-first-seconds",
-        type=int,
-        default=0,
-        metavar="N",
-        help="Ignore triggers for the first N seconds of each epoch (default: 0)",
-    )
+    parser.add_argument("--bet", type=float, default=5.0,
+                        help="Bet amount in USD (default: 5.0)")
+    parser.add_argument("--asset", choices=["btc", "eth"], default="btc",
+                        help="Asset to trade (default: btc)")
+    parser.add_argument("--horizon", choices=["15m", "1h", "4h", "d1"], default="15m",
+                        help="Market horizon (default: 15m)")
+    parser.add_argument("--threshold", type=float, default=0.8,
+                        help="Trigger threshold 0.5-0.95 (default: 0.8)")
+    parser.add_argument("-n", "--dry-run", action="store_true",
+                        help="Simulate without placing real orders")
+    parser.add_argument("--no-wait", action="store_true",
+                        help="Exit after placing order (don't wait for resolution)")
+    parser.add_argument("--once", action="store_true",
+                        help="Run for single epoch only (don't loop)")
+    parser.add_argument("-i", "--ignore-first-seconds", type=int, default=0, metavar="N",
+                        help="Ignore triggers for first N seconds of epoch")
     return parser.parse_args()
 
 
+def horizon_from_str(s: str) -> MarketHorizon:
+    """Convert string to MarketHorizon enum."""
+    return {"15m": MarketHorizon.M15, "1h": MarketHorizon.H1,
+            "4h": MarketHorizon.H4, "d1": MarketHorizon.D1}[s]
+
+
 def check_balance_and_allowance(wallet_address: str, required_amount: float) -> tuple[bool, str]:
-    """Check USDC balance and allowance for trading.
-
-    Args:
-        wallet_address: Wallet address to check
-        required_amount: Required USDC amount for the bet
-
-    Returns:
-        Tuple of (ok, message). ok=True if sufficient funds/allowance.
-    """
+    """Check USDC balance and allowance for trading."""
     for rpc_url in POLYGON_RPC_URLS:
         try:
             w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={'timeout': 10}))
             if not w3.is_connected():
                 continue
 
-            usdc = w3.eth.contract(
-                address=Web3.to_checksum_address(USDC_ADDRESS),
-                abi=ERC20_ABI
-            )
+            usdc = w3.eth.contract(address=Web3.to_checksum_address(USDC_ADDRESS), abi=ERC20_ABI)
             wallet = Web3.to_checksum_address(wallet_address)
             exchange = Web3.to_checksum_address(EXCHANGE_ADDRESS)
 
-            # Get balance and allowance
             balance_raw = usdc.functions.balanceOf(wallet).call()
             allowance_raw = usdc.functions.allowance(wallet, exchange).call()
+            balance, allowance = balance_raw / 1e6, allowance_raw / 1e6
 
-            # Convert from 6 decimals
-            balance = balance_raw / 1e6
-            allowance = allowance_raw / 1e6
-
-            # Check balance
             if balance < required_amount:
                 return False, f"Insufficient USDC balance: ${balance:.2f} < ${required_amount:.2f}"
-
-            # Check allowance (unless unlimited)
             if allowance_raw < 2**255 and allowance < required_amount:
                 return False, f"Insufficient allowance: ${allowance:.2f} < ${required_amount:.2f}"
 
-            return True, f"Balance: ${balance:.2f}, Allowance: {'unlimited' if allowance_raw >= 2**255 else f'${allowance:.2f}'}"
-
-        except Exception as e:
+            allowance_str = 'unlimited' if allowance_raw >= 2**255 else f'${allowance:.2f}'
+            return True, f"Balance: ${balance:.2f}, Allowance: {allowance_str}"
+        except Exception:
             continue
-
     return False, "Failed to connect to Polygon RPC"
 
 
-def horizon_from_str(s: str) -> MarketHorizon:
-    """Convert string to MarketHorizon enum."""
-    mapping = {
-        "15m": MarketHorizon.M15,
-        "1h": MarketHorizon.H1,
-        "4h": MarketHorizon.H4,
-        "d1": MarketHorizon.D1,
-    }
-    return mapping[s]
-
-
-async def monitor_and_trade(
-    api: PolymarketAPI,
-    asset: Asset,
-    horizon: MarketHorizon,
-    threshold: float,
-    size: float,
-    dry_run: bool = False,
-    wait_for_resolution: bool = True,
-    ignore_first_seconds: int = 0,
-) -> dict:
-    """Monitor prices via WebSocket and place order when threshold is reached.
-
-    Uses real-time WebSocket feed for low-latency price monitoring.
-
-    Args:
-        api: Polymarket API client
-        asset: Asset to trade (BTC/ETH)
-        horizon: Market horizon (15m/1h/4h/d1)
-        threshold: Trigger threshold (0.5-0.95)
-        size: Order size in shares
-        dry_run: If True, don't place real orders
-        wait_for_resolution: If True, wait for market to resolve after order
-
-    Returns:
-        dict with winner, order_id, market_slug, resolution, etc.
-    """
-    from decimal import Decimal
-    from poly.markets import fetch_current_prediction, slug_to_timestamp
-    from poly.market_feed import MarketFeed
-
-    # First fetch market info to get token IDs
-    print("\n[1] Fetching market info...")
-    market = await fetch_current_prediction(asset, horizon)
-    if not market:
-        return {"success": False, "error": "Failed to fetch market"}
-
-    print(f"    Market: {market.slug}")
-    up_hex = f"0x{int(market.up_token_id):064x}"
-    down_hex = f"0x{int(market.down_token_id):064x}"
-    print(f"    UP token:   {up_hex[:18]}...")
-    print(f"    DOWN token: {down_hex[:18]}...")
-
-    # Calculate resolution time
-    try:
-        resolution_ts = slug_to_timestamp(market.slug)
-        resolution_time = datetime.fromtimestamp(resolution_ts, tz=timezone.utc)
-        time_remaining = (resolution_time - datetime.now(timezone.utc)).total_seconds()
-        print(f"    Resolves at: {resolution_time.strftime('%H:%M:%S UTC')} ({time_remaining:.0f}s remaining)")
-    except:
-        resolution_time = None
-        time_remaining = None
-
-    # Result container
-    result: dict = {"market_slug": market.slug, "success": False}
-    threshold_decimal = Decimal(str(threshold))
-
-    # Use epoch start time (from slug) for ignore period calculation
-    epoch_start_ts = slug_to_timestamp(market.slug)
-    if epoch_start_ts is None:
-        epoch_start_ts = int(time.time())  # Fallback to now
-
-    # Create an event to signal when threshold is reached
-    triggered = asyncio.Event()
-
-    def on_update(update):
-        """Callback for price updates."""
-        if triggered.is_set():
-            return
-
-        state = feed.get_market(market.slug)
-        if not state:
-            return
-
-        up_price = state.yes_mid
-        down_price = state.no_mid
-
-        if not up_price or not down_price:
-            return
-
-        # Calculate elapsed time since epoch start (not script start)
-        elapsed_since_epoch = int(time.time()) - epoch_start_ts
-
-        # Show status with ignore indicator if in ignore period
-        if elapsed_since_epoch < ignore_first_seconds:
-            print(f"  [{elapsed_since_epoch:4d}s] UP: {float(up_price):.3f} | DOWN: {float(down_price):.3f} (ignoring until {ignore_first_seconds}s)", end="\r")
-            return  # Don't trigger during ignore period
-
-        print(f"  [{elapsed_since_epoch:4d}s] UP: {float(up_price):.3f} | DOWN: {float(down_price):.3f}", end="\r")
-
-        # Trigger at threshold - 0.01 (e.g., 0.79 for 0.8 threshold)
-        trigger_level = threshold_decimal - Decimal("0.01")
-        if up_price >= trigger_level:
-            result.update({
-                "triggered_side": "UP",
-                "token_id": market.up_token_id,
-                "trigger_price": float(up_price),
-            })
-            triggered.set()
-        elif down_price >= trigger_level:
-            result.update({
-                "triggered_side": "DOWN",
-                "token_id": market.down_token_id,
-                "trigger_price": float(down_price),
-            })
-            triggered.set()
-
-    def on_connect():
-        print("    [WS] Connected")
-
-    def on_disconnect():
-        if not triggered.is_set():
-            print("\n    [WS] Reconnecting...")
-
-    # Create and configure feed
-    feed = MarketFeed(on_update=on_update, on_connect=on_connect, on_disconnect=on_disconnect)
-    await feed.add_market(market.slug, market.up_token_id, market.down_token_id)
-
-    print(f"\n[2] Monitoring prices (WebSocket)...")
-    trigger_at = threshold - 0.01
-    print(f"    Waiting for UP >= {trigger_at:.2f} or DOWN >= {trigger_at:.2f}")
-    print("    Press Ctrl+C to cancel\n")
-
-    feed_task = asyncio.create_task(feed.start())
-
-    try:
-        # Wait for trigger
-        await triggered.wait()
-        side = result["triggered_side"]
-        price = result["trigger_price"]
-
-        print(f"\n\n[TRIGGER] {side} reached {price:.3f} >= {threshold - 0.01:.2f}!")
-
-        if dry_run:
-            print(f"    [DRY RUN] Would place BUY {side} order")
-            result["order_id"] = "dry_run"
-            result["success"] = True
-        else:
-            # Place order at slightly above current price to ensure fill
-            order_price = min(price + 0.01, 0.99)
-            print(f"\n[3] Placing BUY {side} order at {order_price:.3f}...")
-
-            order_result = await api.place_order(
-                token_id=result["token_id"],
-                side=OrderSide.BUY,
-                price=order_price,
-                size=size,
-            )
-
-            if order_result.success:
-                print(f"    [OK] Order placed: {order_result.order_id[:20]}...")
-                result["order_id"] = order_result.order_id
-                result["order_price"] = order_price
-                result["success"] = True
-
-                # Check if order was filled
-                await asyncio.sleep(1.0)
-                try:
-                    order_info = await api.get_order(order_result.order_id)
-                    if order_info:
-                        result["size_matched"] = order_info.size_matched
-                        result["size_total"] = order_info.original_size
-                        print(f"    Filled: {order_info.size_matched}/{order_info.original_size} shares")
-                    else:
-                        print(f"    [INFO] Could not fetch order status (order may still be processing)")
-                except Exception as e:
-                    print(f"    [INFO] Could not fetch order status: {e}")
-            else:
-                print(f"    [ERROR] Order failed: {order_result.error_message}")
-                result["error"] = order_result.error_message
-
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        print("\n\n[CANCELLED] Monitoring stopped")
-        result["cancelled"] = True
-    finally:
-        await feed.stop()
-        feed_task.cancel()
-        try:
-            await feed_task
-        except asyncio.CancelledError:
-            pass
-
-    # Wait for market resolution if requested
-    if result.get("success") and wait_for_resolution and not dry_run and resolution_time:
-        print(f"\n[4] Waiting for market resolution...")
-        now = datetime.now(timezone.utc)
-        wait_seconds = (resolution_time - now).total_seconds()
-
-        if wait_seconds > 0:
-            print(f"    Resolution in {wait_seconds:.0f} seconds...")
-            try:
-                # Wait with periodic status updates
-                while wait_seconds > 0:
-                    wait_chunk = min(wait_seconds, 30)
-                    await asyncio.sleep(wait_chunk)
-                    wait_seconds -= wait_chunk
-                    if wait_seconds > 0:
-                        print(f"    {wait_seconds:.0f}s remaining...")
-
-                # Give extra time for resolution to propagate
-                print("    Waiting for resolution to finalize...")
-                await asyncio.sleep(10)
-
-                # Check final result
-                print(f"\n[5] Checking resolution...")
-                market_info = await api.get_market_info(market.slug)
-                if market_info:
-                    result["market_status"] = market_info.status.value
-                    result["resolution"] = market_info.outcome
-                    print(f"    Market status: {market_info.status.value}")
-                    print(f"    Outcome: {market_info.outcome}")
-
-                    # Check if we won
-                    if market_info.outcome:
-                        our_side = result["triggered_side"]
-                        won = (our_side == "UP" and "up" in market_info.outcome.lower()) or \
-                              (our_side == "DOWN" and "down" in market_info.outcome.lower())
-                        result["won"] = won
-                        print(f"    Result: {'WON' if won else 'LOST'}")
-                else:
-                    print("    Could not fetch market info")
-
-            except (asyncio.CancelledError, KeyboardInterrupt):
-                print("\n    [CANCELLED] Stopped waiting for resolution")
-
-    return result
-
-
-async def run_single_epoch(
-    api: PolymarketAPI,
-    asset: Asset,
-    horizon: MarketHorizon,
-    threshold: float,
-    size: float,
-    dry_run: bool,
-    wait_for_resolution: bool,
-    ignore_first_seconds: int = 0,
-) -> dict:
-    """Run the strategy for a single epoch.
-
-    Returns:
-        dict with result including 'success', 'won', 'cancelled', 'error' keys.
-    """
-    result = await monitor_and_trade(
-        api=api,
-        asset=asset,
-        horizon=horizon,
-        threshold=threshold,
-        size=size,
-        dry_run=dry_run,
-        wait_for_resolution=wait_for_resolution,
-        ignore_first_seconds=ignore_first_seconds,
-    )
-
-    # Print epoch summary
+def print_epoch_result(result: dict):
+    """Print the result of an epoch."""
     print("\n" + "=" * 60)
     print("EPOCH RESULT")
     print("=" * 60)
@@ -467,19 +216,245 @@ async def run_single_epoch(
     else:
         print(f"\n  Error: {result.get('error', 'Unknown error')}")
 
+
+async def place_order_and_check(api: PolymarketAPI, token_id: str, price: float,
+                                 size: float, side_name: str) -> dict:
+    """Place an order and check its fill status."""
+    result = {"success": False}
+    order_price = min(price + 0.01, 0.99)
+    print(f"\n[3] Placing BUY {side_name} order at {order_price:.3f}...")
+
+    order_result = await api.place_order(
+        token_id=token_id, side=OrderSide.BUY, price=order_price, size=size
+    )
+
+    if order_result.success:
+        print(f"    [OK] Order placed: {order_result.order_id[:20]}...")
+        result.update({"success": True, "order_id": order_result.order_id, "order_price": order_price})
+
+        await asyncio.sleep(1.0)
+        try:
+            order_info = await api.get_order(order_result.order_id)
+            if order_info:
+                result["size_matched"] = order_info.size_matched
+                result["size_total"] = order_info.original_size
+                print(f"    Filled: {order_info.size_matched}/{order_info.original_size} shares")
+            else:
+                print(f"    [INFO] Could not fetch order status")
+        except Exception as e:
+            print(f"    [INFO] Could not fetch order status: {e}")
+    else:
+        print(f"    [ERROR] Order failed: {order_result.error_message}")
+        result["error"] = order_result.error_message
+
+    return result
+
+
+async def wait_for_resolution(api: PolymarketAPI, market_slug: str,
+                               resolution_time: datetime, triggered_side: str) -> dict:
+    """Wait for market resolution and check result."""
+    result = {}
+    print(f"\n[4] Waiting for market resolution...")
+    now = datetime.now(timezone.utc)
+    wait_seconds = (resolution_time - now).total_seconds()
+
+    if wait_seconds <= 0:
+        return result
+
+    print(f"    Resolution in {wait_seconds:.0f} seconds...")
+    try:
+        while wait_seconds > 0:
+            sleep_chunk = min(wait_seconds, 30)
+            await asyncio.sleep(sleep_chunk)
+            wait_seconds -= sleep_chunk
+            if wait_seconds > 0:
+                print(f"    {wait_seconds:.0f}s remaining...")
+
+        print("    Waiting for resolution to finalize...")
+        await asyncio.sleep(10)
+
+        print(f"\n[5] Checking resolution...")
+        market_info = await api.get_market_info(market_slug)
+        if market_info:
+            result["market_status"] = market_info.status.value
+            result["resolution"] = market_info.outcome
+            print(f"    Market status: {market_info.status.value}")
+            print(f"    Outcome: {market_info.outcome}")
+
+            if market_info.outcome:
+                won = ((triggered_side == "UP" and "up" in market_info.outcome.lower()) or
+                       (triggered_side == "DOWN" and "down" in market_info.outcome.lower()))
+                result["won"] = won
+                print(f"    Result: {'WON' if won else 'LOST'}")
+        else:
+            print("    Could not fetch market info")
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        print("\n    [CANCELLED] Stopped waiting for resolution")
+
+    return result
+
+
+async def monitor_and_trade(
+    api: PolymarketAPI,
+    asset: Asset,
+    horizon: MarketHorizon,
+    threshold: float,
+    size: float,
+    dry_run: bool = False,
+    wait_for_resolution_flag: bool = True,
+    ignore_first_seconds: int = 0,
+) -> dict:
+    """Monitor prices via WebSocket and place order when threshold is reached."""
+    from poly.markets import fetch_current_prediction
+    from poly.market_feed import MarketFeed
+
+    # Fetch market info
+    print("\n[1] Fetching market info...")
+    market = await fetch_current_prediction(asset, horizon)
+    if not market:
+        return {"success": False, "error": "Failed to fetch market"}
+
+    print(f"    Market: {market.slug}")
+    print(f"    UP token:   0x{int(market.up_token_id):064x}"[:24] + "...")
+    print(f"    DOWN token: 0x{int(market.down_token_id):064x}"[:24] + "...")
+
+    # Calculate resolution time
+    resolution_time = None
+    try:
+        resolution_ts = slug_to_timestamp(market.slug)
+        resolution_time = datetime.fromtimestamp(resolution_ts, tz=timezone.utc)
+        time_remaining = (resolution_time - datetime.now(timezone.utc)).total_seconds()
+        print(f"    Resolves at: {resolution_time.strftime('%H:%M:%S UTC')} ({time_remaining:.0f}s remaining)")
+    except Exception:
+        pass
+
+    # Initialize state
+    result: dict = {"market_slug": market.slug, "success": False}
+    threshold_decimal = Decimal(str(threshold))
+    trigger_level = threshold_decimal - Decimal("0.01")
+
+    epoch_start_ts = slug_to_timestamp(market.slug) or int(time.time())
+    price_state = {"btc": PriceState(), "eth": PriceState()}
+    triggered = asyncio.Event()
+    trigger_info: Optional[TriggerInfo] = None
+
+    def on_binance_kline(kline):
+        key = "btc" if kline.symbol == "BTCUSDT" else "eth" if kline.symbol == "ETHUSDT" else None
+        if key:
+            price_state[key].open_price = float(kline.open)
+            price_state[key].close_price = float(kline.close)
+
+    def on_update(update):
+        nonlocal trigger_info
+        if triggered.is_set():
+            return
+
+        state = feed.get_market(market.slug)
+        if not state or not state.yes_mid or not state.no_mid:
+            return
+
+        up_price, down_price = state.yes_mid, state.no_mid
+        elapsed = int(time.time()) - epoch_start_ts
+        ps = price_state["btc"] if asset == Asset.BTC else price_state["eth"]
+        spot_str = ps.format_display()
+
+        # Display status
+        status = f"  [{elapsed:4d}s] {spot_str} | UP: {float(up_price):.3f} | DOWN: {float(down_price):.3f}"
+        if elapsed < ignore_first_seconds:
+            print(status + f" (ignoring until {ignore_first_seconds}s)", end="\r")
+            return
+        print(status, end="\r")
+
+        # Check trigger
+        if up_price >= trigger_level or down_price >= trigger_level:
+            side = "UP" if up_price >= trigger_level else "DOWN"
+            token_id = market.up_token_id if side == "UP" else market.down_token_id
+            price = float(up_price) if side == "UP" else float(down_price)
+
+            trigger_info = TriggerInfo(
+                side=side, token_id=token_id, trigger_price=price,
+                elapsed_seconds=elapsed, spot_price=ps.close_price, spot_open=ps.open_price,
+                log_delta_pct=ps.log_delta_pct,
+                up_bid=float(state.yes_bid) if state.yes_bid else None,
+                up_ask=float(state.yes_ask) if state.yes_ask else None,
+                down_bid=float(state.no_bid) if state.no_bid else None,
+                down_ask=float(state.no_ask) if state.no_ask else None,
+            )
+            triggered.set()
+
+    # Setup WebSocket feeds
+    feed = MarketFeed(on_update=on_update,
+                      on_connect=lambda: print("    [WS] Connected"),
+                      on_disconnect=lambda: print("\n    [WS] Reconnecting...") if not triggered.is_set() else None)
+    await feed.add_market(market.slug, market.up_token_id, market.down_token_id)
+
+    binance_symbol = BTCUSDT if asset == Asset.BTC else ETHUSDT
+    binance_stream = BinanceKlineStream(symbol=binance_symbol, interval=INTERVAL_1M, on_kline=on_binance_kline)
+
+    print(f"\n[2] Monitoring prices (WebSocket)...")
+    print(f"    Waiting for UP >= {threshold - 0.01:.2f} or DOWN >= {threshold - 0.01:.2f}")
+    print("    Press Ctrl+C to cancel\n")
+
+    feed_task = asyncio.create_task(feed.start())
+    binance_task = asyncio.create_task(binance_stream.start())
+
+    try:
+        await triggered.wait()
+        trigger_info.print_details(threshold)
+
+        if dry_run:
+            print(f"    [DRY RUN] Would place BUY {trigger_info.side} order")
+            result.update({"success": True, "order_id": "dry_run", "triggered_side": trigger_info.side,
+                          "trigger_price": trigger_info.trigger_price})
+        else:
+            order_result = await place_order_and_check(api, trigger_info.token_id,
+                                                        trigger_info.trigger_price, size, trigger_info.side)
+            result.update(order_result)
+            result["triggered_side"] = trigger_info.side
+            result["trigger_price"] = trigger_info.trigger_price
+
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        print("\n\n[CANCELLED] Monitoring stopped")
+        result["cancelled"] = True
+    finally:
+        await feed.stop()
+        await binance_stream.stop()
+        for task in [feed_task, binance_task]:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    # Wait for resolution if requested
+    if result.get("success") and wait_for_resolution_flag and not dry_run and resolution_time:
+        resolution_result = await wait_for_resolution(api, market.slug, resolution_time, result["triggered_side"])
+        result.update(resolution_result)
+
+    return result
+
+
+async def run_single_epoch(api: PolymarketAPI, asset: Asset, horizon: MarketHorizon,
+                            threshold: float, size: float, dry_run: bool,
+                            wait_for_resolution: bool, ignore_first_seconds: int = 0) -> dict:
+    """Run the strategy for a single epoch."""
+    result = await monitor_and_trade(
+        api=api, asset=asset, horizon=horizon, threshold=threshold, size=size,
+        dry_run=dry_run, wait_for_resolution_flag=wait_for_resolution,
+        ignore_first_seconds=ignore_first_seconds,
+    )
+    print_epoch_result(result)
     return result
 
 
 async def main() -> int:
     args = parse_args()
-
-    # Calculate size from bet amount
     size = args.bet / args.threshold
-
     asset = Asset.BTC if args.asset == "btc" else Asset.ETH
     horizon = horizon_from_str(args.horizon)
     loop_mode = not args.once
 
+    # Print configuration
     print("\n" + "=" * 60)
     print("EXTREME THRESHOLD TRADING" + (" (CONTINUOUS)" if loop_mode else " (SINGLE EPOCH)"))
     print("=" * 60)
@@ -495,102 +470,76 @@ async def main() -> int:
     if args.ignore_first_seconds > 0:
         print(f"  Ignore:     First {args.ignore_first_seconds}s of each epoch")
 
-    # Load credentials (unless dry run)
+    # Load credentials
     poly_config = None
-    api = None
     if not args.dry_run:
         try:
             poly_config = PolymarketConfig.load()
             print(f"\n  Wallet:     {poly_config.wallet_address}")
             if not poly_config.has_trading_credentials:
-                print("\n[ERROR] No trading credentials configured")
-                print("Set POLYMARKET_PRIVATE_KEY environment variable")
+                print("\n[ERROR] No trading credentials. Set POLYMARKET_PRIVATE_KEY")
                 return 1
         except Exception as e:
             print(f"\n[ERROR] Failed to load config: {e}")
             return 1
 
-    epoch_count = 0
-    wins = 0
-    losses = 0
+    epoch_count, wins, losses = 0, 0, 0
 
     try:
         while True:
             epoch_count += 1
-
             print("\n" + "=" * 60)
             print(f"EPOCH {epoch_count}")
             print("=" * 60)
 
-            # Check balance and allowance before each epoch (unless dry run)
+            # Check balance
             if not args.dry_run and poly_config:
                 print("\n[0] Checking balance and allowance...")
                 ok, msg = check_balance_and_allowance(poly_config.wallet_address, args.bet)
                 print(f"    {msg}")
                 if not ok:
-                    print("\n[EXIT] Insufficient funds or allowance. Stopping.")
+                    print("\n[EXIT] Insufficient funds or allowance.")
                     break
 
-            # Create fresh API connection for each epoch
-            if not args.dry_run and poly_config:
-                api = PolymarketAPI(poly_config)
-
+            # Run epoch
+            api = PolymarketAPI(poly_config) if not args.dry_run and poly_config else None
             try:
                 result = await run_single_epoch(
-                    api=api,
-                    asset=asset,
-                    horizon=horizon,
-                    threshold=args.threshold,
-                    size=size,
-                    dry_run=args.dry_run,
-                    wait_for_resolution=not args.no_wait,
+                    api=api, asset=asset, horizon=horizon, threshold=args.threshold,
+                    size=size, dry_run=args.dry_run, wait_for_resolution=not args.no_wait,
                     ignore_first_seconds=args.ignore_first_seconds,
                 )
-
-                # Track results
                 if result.get("won") is True:
                     wins += 1
                 elif result.get("won") is False:
                     losses += 1
-
-                # Check for cancellation
                 if result.get("cancelled"):
-                    print("\n[EXIT] User cancelled. Stopping.")
                     break
-
             finally:
                 if api:
                     await api.close()
-                    api = None
 
-            # Exit if single epoch mode
             if not loop_mode:
                 break
 
             # Wait for next epoch
             next_epoch_ts = get_slot_timestamp(horizon, 1)
-            now_ts = int(time.time())
-            wait_seconds = next_epoch_ts - now_ts
-
+            wait_seconds = next_epoch_ts - int(time.time())
             if wait_seconds > 0:
                 next_time = datetime.fromtimestamp(next_epoch_ts, tz=timezone.utc)
                 print(f"\n[NEXT EPOCH] Waiting {wait_seconds}s until {next_time.strftime('%H:%M:%S UTC')}...")
                 print(f"             Stats: {wins}W / {losses}L / {epoch_count} epochs")
-
                 try:
-                    # Sleep in chunks to allow Ctrl+C to work
                     while wait_seconds > 0:
-                        sleep_chunk = min(wait_seconds, 30)
-                        await asyncio.sleep(sleep_chunk)
-                        wait_seconds -= sleep_chunk
+                        await asyncio.sleep(min(wait_seconds, 30))
+                        wait_seconds -= 30
                         if wait_seconds > 0:
                             print(f"             {wait_seconds}s remaining...", end="\r")
                 except (asyncio.CancelledError, KeyboardInterrupt):
-                    print("\n[EXIT] User interrupted during wait. Stopping.")
                     break
 
     except KeyboardInterrupt:
-        print("\n\n[EXIT] User interrupted. Stopping.")
+        print("\n\n[EXIT] User interrupted.")
 
     # Final summary
     print("\n" + "=" * 60)
@@ -600,8 +549,7 @@ async def main() -> int:
     print(f"  Wins:       {wins}")
     print(f"  Losses:     {losses}")
     if wins + losses > 0:
-        win_rate = wins / (wins + losses) * 100
-        print(f"  Win rate:   {win_rate:.1f}%")
+        print(f"  Win rate:   {wins / (wins + losses) * 100:.1f}%")
 
     return 0
 

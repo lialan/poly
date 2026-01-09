@@ -273,8 +273,10 @@ def main():
 
     # Display resolved positions (redeemable)
     if resolved_positions:
+        # Sort by slug descending (newest first)
+        sorted_resolved = sorted(resolved_positions, key=lambda p: p.slug or p.condition_id, reverse=True)
         print(f"\nResolved Positions ({len(resolved_positions)}) - can be redeemed:")
-        for pos in resolved_positions[:5]:  # Show max 5
+        for pos in sorted_resolved[:5]:  # Show max 5
             side = "YES" if pos.outcome == "Yes" else "NO"
             pnl = pos.cash_pnl
             pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
