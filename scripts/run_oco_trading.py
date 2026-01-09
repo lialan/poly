@@ -231,13 +231,13 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Extreme threshold trading - bet when market shows conviction"
     )
-    parser.add_argument("--bet", type=float, default=5.0,
+    parser.add_argument("-b", "--bet", type=float, default=5.0,
                         help="Bet amount in USD (default: 5.0)")
-    parser.add_argument("--asset", choices=["btc", "eth"], default="btc",
+    parser.add_argument("-a", "--asset", choices=["btc", "eth"], default="btc",
                         help="Asset to trade (default: btc)")
     parser.add_argument("--horizon", choices=["15m", "1h", "4h", "d1"], default="15m",
                         help="Market horizon (default: 15m)")
-    parser.add_argument("--threshold", type=float, default=0.8,
+    parser.add_argument("-t", "--threshold", type=float, default=0.8,
                         help="Trigger threshold 0.5-0.95 (default: 0.8)")
     parser.add_argument("-n", "--dry-run", action="store_true",
                         help="Simulate without placing real orders")
