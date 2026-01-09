@@ -2,20 +2,49 @@
 """
 Analyze BTC 15m market extreme probability behavior.
 
-Queries Bigtable to find:
-1. P(UP wins | hit high threshold first) - How often does hitting high% first lead to UP winning?
-2. P(DOWN wins | hit low threshold first) - How often does hitting low% first lead to DOWN winning?
+================================================================================
+HOW THIS SCRIPT WORKS
+================================================================================
 
-Usage:
-    # Default: 10% threshold (90% high, 10% low)
-    python scripts/query_btc_15m_extremes.py
+CONCEPT:
+    BTC 15-minute prediction markets on Polymarket have YES tokens representing
+    "BTC will be UP from the start price at resolution". This script analyzes
+    what happens when the YES probability hits extreme values (e.g., 85% or 15%).
 
-    # Custom threshold: 15% (85% high, 15% low)
-    python scripts/query_btc_15m_extremes.py -t 15
+    Key question: If the market hits 85% YES early, how often does UP actually win?
 
-    # Multiple thresholds
-    python scripts/query_btc_15m_extremes.py -t 5
-    python scripts/query_btc_15m_extremes.py -t 20
+METHODOLOGY:
+    1. Query all BTC 15m market snapshots from Bigtable
+    2. For each market, track the YES probability over time
+    3. Identify which extreme threshold was hit FIRST (high or low)
+    4. Check the final outcome (UP won = prob >= 95%, DOWN won = prob <= 5%)
+    5. Calculate P(UP wins | hit high% first) and P(DOWN wins | hit low% first)
+
+THRESHOLDS:
+    The -t flag sets the threshold percentage. For -t 15:
+      - High threshold: 85% (100 - 15)
+      - Low threshold:  15%
+      - Approach zone:  ±5% from threshold (80% for high, 20% for low)
+
+METRICS REPORTED:
+    For each direction (hit high first / hit low first):
+
+    1. P(success) - Probability that hitting the threshold leads to correct outcome
+
+    2. Log(price) delta - BTC price change from market start to threshold hit
+       Helps identify if price momentum correlates with prediction accuracy
+
+    3. Time to threshold - How long from market start until threshold was hit
+       - Delta time: Time spent in "approach zone" (threshold ±5%) before hitting
+       - Distribution: Bucketed by time (0-3min, 3-6min, etc.) with success rates
+       - Avg depth: Average orderbook depth at threshold hit per time bucket
+
+USAGE:
+    python scripts/query_btc_15m_extremes.py           # Default: 10% threshold
+    python scripts/query_btc_15m_extremes.py -t 15    # 15% threshold (85%/15%)
+    python scripts/query_btc_15m_extremes.py -t 20    # 20% threshold (80%/20%)
+
+================================================================================
 """
 
 import argparse
@@ -24,6 +53,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -35,24 +65,12 @@ import json
 class MarketAnalysis:
     """Analysis results for a single market."""
     market_id: str
-    snapshots: int
-    first_extreme: str | None  # "high" or "low", or None
-    final_outcome: str | None  # "up" (100%), "down" (0%), or None
-    min_prob: float
-    max_prob: float
-    first_extreme_time: float | None
-    final_time: float | None
-    # BTC price analysis
-    start_price: float | None
-    threshold_price: float | None
-    log_price_delta: float | None  # log(threshold_price) - log(start_price)
-    # Time analysis
-    start_time: float | None
-    time_to_threshold: float | None  # seconds from market start to threshold hit
-    # Orderbook depth at threshold
-    threshold_depth: float | None  # total shares in orderbook when threshold hit
-    # Time from approach zone (threshold ±5%) to threshold
-    time_from_approach: float | None  # seconds from first entering approach zone to threshold hit
+    first_extreme: str | None      # "high" or "low", or None if never hit
+    final_outcome: str | None      # "up", "down", or None if unresolved
+    log_price_delta: float | None  # log(threshold_price / start_price)
+    time_to_threshold: float | None
+    time_from_approach: float | None
+    threshold_depth: float | None
 
 
 def get_yes_mid_price(orderbook_json: str) -> float | None:
@@ -61,14 +79,10 @@ def get_yes_mid_price(orderbook_json: str) -> float | None:
         data = json.loads(orderbook_json)
         yes_bids = data.get("yes_bids", [])
         yes_asks = data.get("yes_asks", [])
-
         if not yes_bids or not yes_asks:
             return None
-
-        # bids and asks are [(price, size), ...]
         best_bid = max(b[0] for b in yes_bids)
         best_ask = min(a[0] for a in yes_asks)
-
         return (best_bid + best_ask) / 2
     except (json.JSONDecodeError, KeyError, ValueError, TypeError):
         return None
@@ -78,153 +92,102 @@ def get_orderbook_depth(orderbook_json: str) -> float | None:
     """Extract total orderbook depth (shares) from orderbook JSON."""
     try:
         data = json.loads(orderbook_json)
-        total = 0.0
-        for key in ["yes_bids", "yes_asks", "no_bids", "no_asks"]:
-            orders = data.get(key, [])
-            for order in orders:
-                # order is [price, size]
-                total += order[1]
+        total = sum(
+            order[1]
+            for key in ["yes_bids", "yes_asks", "no_bids", "no_asks"]
+            for order in data.get(key, [])
+        )
         return total if total > 0 else None
     except (json.JSONDecodeError, KeyError, ValueError, TypeError, IndexError):
         return None
 
 
-def analyze_market(snapshots: list[dict], threshold: float) -> MarketAnalysis:
-    """Analyze a single market's probability trajectory.
-
-    Args:
-        snapshots: List of market snapshots.
-        threshold: Percentage threshold (e.g., 15 means high=85%, low=15%).
-    """
+def analyze_market(snapshots: list[dict], threshold: float) -> MarketAnalysis | None:
+    """Analyze a single market's probability trajectory."""
     if not snapshots:
         return None
 
     market_id = snapshots[0].get("market_id", "unknown")
-
-    # Sort by timestamp (oldest first)
     sorted_snaps = sorted(snapshots, key=lambda x: x.get("ts", 0))
 
-    # Track probability and price over time
-    data_points = []  # [(ts, prob, spot_price, orderbook_json), ...]
+    # Extract data points: (timestamp, probability, spot_price, orderbook_json)
+    data_points = []
     for snap in sorted_snaps:
         orderbook = snap.get("orderbook", "{}")
         prob = get_yes_mid_price(orderbook)
-        spot_price = snap.get("spot_price", 0)
         if prob is not None:
-            data_points.append((snap.get("ts", 0), prob, spot_price, orderbook))
+            data_points.append((
+                snap.get("ts", 0),
+                prob,
+                snap.get("spot_price", 0),
+                orderbook
+            ))
 
     if not data_points:
-        return MarketAnalysis(
-            market_id=market_id,
-            snapshots=len(snapshots),
-            first_extreme=None,
-            final_outcome=None,
-            min_prob=0,
-            max_prob=0,
-            first_extreme_time=None,
-            final_time=None,
-            start_price=None,
-            threshold_price=None,
-            log_price_delta=None,
-            start_time=None,
-            time_to_threshold=None,
-            threshold_depth=None,
-            time_from_approach=None,
-        )
+        return None
 
-    # Get start time and price
+    # Thresholds
+    HIGH_THRESHOLD = (100 - threshold) / 100
+    LOW_THRESHOLD = threshold / 100
+    APPROACH_MARGIN = 0.05
+    HIGH_APPROACH = HIGH_THRESHOLD - APPROACH_MARGIN
+    LOW_APPROACH = LOW_THRESHOLD + APPROACH_MARGIN
+
     start_time = data_points[0][0]
     start_price = data_points[0][2] if data_points[0][2] > 0 else None
 
-    # Calculate thresholds from input percentage
-    HIGH_THRESHOLD = (100 - threshold) / 100  # e.g., 15 -> 0.85
-    LOW_THRESHOLD = threshold / 100            # e.g., 15 -> 0.15
-
-    # Approach zone: threshold ±5%
-    APPROACH_MARGIN = 0.05
-    HIGH_APPROACH = HIGH_THRESHOLD - APPROACH_MARGIN  # e.g., 0.85 - 0.05 = 0.80
-    LOW_APPROACH = LOW_THRESHOLD + APPROACH_MARGIN    # e.g., 0.15 + 0.05 = 0.20
-
-    # Find first extreme and price at that point
+    # Find first extreme hit
     first_extreme = None
-    first_extreme_time = None
+    threshold_time = None
     threshold_price = None
     threshold_depth = None
-    approach_time = None  # when first entered approach zone
+    approach_time = None
 
     for ts, prob, price, ob_json in data_points:
-        # Track approach zone entry (before hitting threshold)
+        # Track approach zone entry
         if approach_time is None:
-            if prob >= HIGH_APPROACH and prob < HIGH_THRESHOLD:
+            if HIGH_APPROACH <= prob < HIGH_THRESHOLD:
                 approach_time = ts
-            elif prob <= LOW_APPROACH and prob > LOW_THRESHOLD:
+            elif LOW_THRESHOLD < prob <= LOW_APPROACH:
                 approach_time = ts
 
         if prob >= HIGH_THRESHOLD:
             first_extreme = "high"
-            first_extreme_time = ts
+            threshold_time = ts
             threshold_price = price if price > 0 else None
             threshold_depth = get_orderbook_depth(ob_json)
-            # If we hit threshold without going through approach zone first, use threshold time
             if approach_time is None:
                 approach_time = ts
             break
         elif prob <= LOW_THRESHOLD:
             first_extreme = "low"
-            first_extreme_time = ts
+            threshold_time = ts
             threshold_price = price if price > 0 else None
             threshold_depth = get_orderbook_depth(ob_json)
-            # If we hit threshold without going through approach zone first, use threshold time
             if approach_time is None:
                 approach_time = ts
             break
 
-    # Calculate log price delta and time to threshold
+    # Calculate derived metrics
     log_price_delta = None
     if start_price and threshold_price and start_price > 0 and threshold_price > 0:
         log_price_delta = math.log(threshold_price) - math.log(start_price)
 
-    time_to_threshold = None
-    if first_extreme_time and start_time:
-        time_to_threshold = first_extreme_time - start_time
+    time_to_threshold = threshold_time - start_time if threshold_time else None
+    time_from_approach = threshold_time - approach_time if threshold_time and approach_time else None
 
-    # Calculate time from approach zone to threshold
-    time_from_approach = None
-    if first_extreme_time and approach_time:
-        time_from_approach = first_extreme_time - approach_time
-
-    # Determine final outcome from last snapshot
-    final_ts, final_prob, _, _ = data_points[-1]
-    final_outcome = None
-
-    # Consider 95%+ as UP won, 5%- as DOWN won
-    FINAL_HIGH = 0.95
-    FINAL_LOW = 0.05
-
-    if final_prob >= FINAL_HIGH:
-        final_outcome = "up"
-    elif final_prob <= FINAL_LOW:
-        final_outcome = "down"
-
-    min_prob = min(p for _, p, _, _ in data_points)
-    max_prob = max(p for _, p, _, _ in data_points)
+    # Determine final outcome (95%+ = UP won, 5%- = DOWN won)
+    final_prob = data_points[-1][1]
+    final_outcome = "up" if final_prob >= 0.95 else "down" if final_prob <= 0.05 else None
 
     return MarketAnalysis(
         market_id=market_id,
-        snapshots=len(snapshots),
         first_extreme=first_extreme,
         final_outcome=final_outcome,
-        min_prob=min_prob,
-        max_prob=max_prob,
-        first_extreme_time=first_extreme_time,
-        final_time=final_ts,
-        start_price=start_price,
-        threshold_price=threshold_price,
         log_price_delta=log_price_delta,
-        start_time=start_time,
         time_to_threshold=time_to_threshold,
-        threshold_depth=threshold_depth,
         time_from_approach=time_from_approach,
+        threshold_depth=threshold_depth,
     )
 
 
@@ -234,13 +197,12 @@ def query_all_markets(
     table_name: str = "btc_15m_snapshot",
     limit: int = 100000,
 ) -> dict[str, list[dict]]:
-    """Query all snapshots and group by market_id."""
+    """Query all snapshots from Bigtable and group by market_id."""
     client = bigtable.Client(project=project_id, admin=True)
     instance = client.instance(instance_id)
     table = instance.table(table_name)
 
     print(f"Querying {table_name}...")
-
     markets = defaultdict(list)
     row_count = 0
 
@@ -249,22 +211,18 @@ def query_all_markets(
         cells = row.cells.get("data", {})
 
         def get_val(key: bytes) -> str | None:
-            if key in cells:
-                return cells[key][0].value.decode()
-            return None
+            return cells[key][0].value.decode() if key in cells else None
 
         market_id = get_val(b"market_id")
         if not market_id:
             continue
 
-        snap = {
+        markets[market_id].append({
             "ts": float(get_val(b"ts") or 0),
             "market_id": market_id,
             "orderbook": get_val(b"orderbook") or "{}",
             "spot_price": float(get_val(b"spot_price") or 0),
-        }
-
-        markets[market_id].append(snap)
+        })
 
         if row_count % 10000 == 0:
             print(f"  Processed {row_count} rows, {len(markets)} markets...")
@@ -273,28 +231,121 @@ def query_all_markets(
     return dict(markets)
 
 
+# ============================================================================
+# Output helpers
+# ============================================================================
+
+def calc_stats(values: list[float]) -> tuple[float, float, float, float]:
+    """Calculate min, max, mean, median for a list of values."""
+    sorted_vals = sorted(values)
+    return (
+        min(values),
+        max(values),
+        sum(values) / len(values),
+        sorted_vals[len(sorted_vals) // 2]
+    )
+
+
+def print_price_delta(label: str, analyses: list[MarketAnalysis]) -> None:
+    """Print log price delta statistics."""
+    deltas = [a.log_price_delta for a in analyses if a.log_price_delta is not None]
+    if not deltas:
+        return
+    mn, mx, mean, median = calc_stats(deltas)
+    print(f"\n  Log(price) delta when threshold hit ({label}):")
+    print(f"    Count:  {len(deltas)}")
+    print(f"    Min:    {mn*100:+.4f}%")
+    print(f"    Max:    {mx*100:+.4f}%")
+    print(f"    Mean:   {mean*100:+.4f}%")
+    print(f"    Median: {median*100:+.4f}%")
+
+
+def print_time_analysis(
+    correct: list[MarketAnalysis],
+    all_resolved: list[MarketAnalysis],
+    is_correct_fn: Callable[[MarketAnalysis], bool],
+    approach_label: str,
+) -> None:
+    """Print time to threshold analysis with distribution."""
+    times_correct = [a.time_to_threshold for a in correct if a.time_to_threshold is not None]
+    if not times_correct:
+        return
+
+    mn, mx, mean, median = calc_stats(times_correct)
+    print(f"\n  Time to threshold (CORRECT predictions):")
+    print(f"    Count:  {len(times_correct)}")
+    print(f"    Min:    {mn:.1f}s")
+    print(f"    Max:    {mx:.1f}s")
+    print(f"    Mean:   {mean:.1f}s")
+    print(f"    Median: {median:.1f}s")
+
+    # Delta time (approach zone to threshold)
+    delta_times = [a.time_from_approach for a in correct if a.time_from_approach is not None]
+    if delta_times:
+        _, _, delta_mean, delta_median = calc_stats(delta_times)
+        print(f"    Delta ({approach_label}): min={min(delta_times):.1f}s, max={max(delta_times):.1f}s, mean={delta_mean:.1f}s, median={delta_median:.1f}s")
+
+    # Distribution buckets (0-3min, 3-6min, 6-9min, 9-12min, 12-15min)
+    buckets_correct = [0] * 5
+    buckets_total = [0] * 5
+    buckets_depth: list[list[float]] = [[] for _ in range(5)]
+
+    for a in correct:
+        if a.time_to_threshold is not None:
+            idx = min(int(a.time_to_threshold // 180), 4)
+            buckets_correct[idx] += 1
+            if a.threshold_depth is not None:
+                buckets_depth[idx].append(a.threshold_depth)
+
+    for a in all_resolved:
+        if a.time_to_threshold is not None:
+            idx = min(int(a.time_to_threshold // 180), 4)
+            buckets_total[idx] += 1
+
+    print(f"    Distribution (with success rate and avg depth):")
+    labels = ["0-3min", "3-6min", "6-9min", "9-12min", "12-15min"]
+    for i, label in enumerate(labels):
+        pct = buckets_correct[i] / len(times_correct) * 100 if times_correct else 0
+        success_rate = buckets_correct[i] / buckets_total[i] * 100 if buckets_total[i] > 0 else 0
+        avg_depth = sum(buckets_depth[i]) / len(buckets_depth[i]) if buckets_depth[i] else 0
+        print(f"      {label:8s} {buckets_correct[i]:3d} ({pct:5.1f}%) | P(success): {success_rate:5.1f}% ({buckets_correct[i]}/{buckets_total[i]}) | Avg depth: {avg_depth:,.0f}")
+
+
+def print_question_analysis(
+    title: str,
+    hit_first: list[MarketAnalysis],
+    correct: list[MarketAnalysis],
+    wrong: list[MarketAnalysis],
+    prob_label: str,
+    approach_label: str,
+) -> None:
+    """Print analysis for one question (Q1 or Q2)."""
+    print(f"{'─' * 70}")
+    print(title)
+    print(f"{'─' * 70}")
+    print(f"  Total:         {len(hit_first)}")
+    print(f"  Correct:       {len(correct)}")
+    print(f"  Wrong:         {len(wrong)}")
+
+    resolved = len(correct) + len(wrong)
+    if resolved > 0:
+        prob = len(correct) / resolved * 100
+        print(f"\n  {prob_label} = {prob:.1f}%")
+        print(f"  (Based on {resolved} resolved markets)")
+
+    print_price_delta("CORRECT", correct)
+
+    all_resolved = correct + wrong
+    print_time_analysis(correct, all_resolved, lambda a: a in correct, approach_label)
+
+    print_price_delta("FAILED", wrong)
+    print()
+
+
 def main():
-    parser = argparse.ArgumentParser(
-        description="Analyze BTC 15m market extreme probability behavior",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-    # Default: 10% threshold (90% high, 10% low)
-    python scripts/query_btc_15m_extremes.py
-
-    # 15% threshold (85% high, 15% low)
-    python scripts/query_btc_15m_extremes.py -t 15
-
-    # 5% threshold (95% high, 5% low)
-    python scripts/query_btc_15m_extremes.py -t 5
-        """,
-    )
-    parser.add_argument(
-        "-t", "--threshold",
-        type=float,
-        default=10,
-        help="Threshold percentage (default: 10, meaning 90%% high / 10%% low)",
-    )
+    parser = argparse.ArgumentParser(description="Analyze BTC 15m extreme probability behavior")
+    parser.add_argument("-t", "--threshold", type=float, default=10,
+                        help="Threshold %% (default: 10, meaning 90%% high / 10%% low)")
     args = parser.parse_args()
 
     threshold = args.threshold
@@ -306,237 +357,51 @@ Examples:
     print(f"Threshold: {threshold}% (High: {high_pct}%, Low: {low_pct}%)")
     print("=" * 70)
 
-    # Query all markets
     markets_data = query_all_markets()
-
     if not markets_data:
         print("\nNo data found!")
         return 1
 
-    # Analyze each market
     print(f"\nAnalyzing {len(markets_data)} markets...")
-    analyses = []
+    analyses = [a for a in (analyze_market(snaps, threshold) for snaps in markets_data.values()) if a]
 
-    for market_id, snapshots in markets_data.items():
-        analysis = analyze_market(snapshots, threshold)
-        if analysis:
-            analyses.append(analysis)
+    # Categorize markets
+    hit_high = [a for a in analyses if a.first_extreme == "high"]
+    hit_high_up = [a for a in hit_high if a.final_outcome == "up"]
+    hit_high_down = [a for a in hit_high if a.final_outcome == "down"]
 
-    # Calculate statistics
+    hit_low = [a for a in analyses if a.first_extreme == "low"]
+    hit_low_down = [a for a in hit_low if a.final_outcome == "down"]
+    hit_low_up = [a for a in hit_low if a.final_outcome == "up"]
+
+    resolved = [a for a in analyses if a.final_outcome is not None]
+
     print(f"\n{'─' * 70}")
     print("RESULTS")
     print(f"{'─' * 70}")
-
-    # Markets that hit high% first (before low%)
-    hit_high_first = [a for a in analyses if a.first_extreme == "high"]
-    hit_high_then_up = [a for a in hit_high_first if a.final_outcome == "up"]
-    hit_high_then_down = [a for a in hit_high_first if a.final_outcome == "down"]
-
-    # Markets that hit low% first (before high%)
-    hit_low_first = [a for a in analyses if a.first_extreme == "low"]
-    hit_low_then_down = [a for a in hit_low_first if a.final_outcome == "down"]
-    hit_low_then_up = [a for a in hit_low_first if a.final_outcome == "up"]
-
-    # Markets that never hit either extreme
-    no_extreme = [a for a in analyses if a.first_extreme is None]
-
-    # Markets with resolved outcome
-    resolved = [a for a in analyses if a.final_outcome is not None]
-
     print(f"\nTotal markets analyzed: {len(analyses)}")
-    print(f"Markets with resolved outcome: {len(resolved)}")
-    print()
+    print(f"Markets with resolved outcome: {len(resolved)}\n")
 
-    # Question 1: P(UP wins | hit high% first)
-    print(f"{'─' * 70}")
-    print(f"Q1: Markets that hit {high_pct:.0f}%+ UP before hitting {low_pct:.0f}%- UP")
-    print(f"{'─' * 70}")
-    print(f"  Total:           {len(hit_high_first)}")
-    print(f"  Then UP won:     {len(hit_high_then_up)}")
-    print(f"  Then DOWN won:   {len(hit_high_then_down)}")
-    if hit_high_first:
-        resolved_high = len(hit_high_then_up) + len(hit_high_then_down)
-        if resolved_high > 0:
-            prob = len(hit_high_then_up) / resolved_high * 100
-            print(f"\n  P(UP wins | hit {high_pct:.0f}% first) = {prob:.1f}%")
-            print(f"  (Based on {resolved_high} resolved markets)")
+    # Q1: Hit high threshold first
+    print_question_analysis(
+        title=f"Q1: Markets that hit {high_pct:.0f}%+ UP before hitting {low_pct:.0f}%- UP",
+        hit_first=hit_high,
+        correct=hit_high_up,
+        wrong=hit_high_down,
+        prob_label=f"P(UP wins | hit {high_pct:.0f}% first)",
+        approach_label=f"{high_pct-5:.0f}%→{high_pct:.0f}%",
+    )
 
-            # Time from approach zone (threshold-5%) to threshold
-            approach_times_correct = [a.time_from_approach for a in hit_high_then_up if a.time_from_approach is not None]
-            approach_times_wrong = [a.time_from_approach for a in hit_high_then_down if a.time_from_approach is not None]
-            approach_times_all = approach_times_correct + approach_times_wrong
-            if approach_times_all:
-                print(f"\n  Time from {high_pct-5:.0f}% to {high_pct:.0f}% (approach -> threshold):")
-                print(f"    All:     mean={sum(approach_times_all)/len(approach_times_all):.1f}s, median={sorted(approach_times_all)[len(approach_times_all)//2]:.1f}s (n={len(approach_times_all)})")
-                if approach_times_correct:
-                    print(f"    Correct: mean={sum(approach_times_correct)/len(approach_times_correct):.1f}s, median={sorted(approach_times_correct)[len(approach_times_correct)//2]:.1f}s (n={len(approach_times_correct)})")
-                if approach_times_wrong:
-                    print(f"    Failed:  mean={sum(approach_times_wrong)/len(approach_times_wrong):.1f}s, median={sorted(approach_times_wrong)[len(approach_times_wrong)//2]:.1f}s (n={len(approach_times_wrong)})")
+    # Q2: Hit low threshold first
+    print_question_analysis(
+        title=f"Q2: Markets that hit {low_pct:.0f}%- UP before hitting {high_pct:.0f}%+ UP",
+        hit_first=hit_low,
+        correct=hit_low_down,
+        wrong=hit_low_up,
+        prob_label=f"P(DOWN wins | hit {low_pct:.0f}% first)",
+        approach_label=f"{low_pct+5:.0f}%→{low_pct:.0f}%",
+    )
 
-        # Log price delta for correctly predicted (hit high -> UP won)
-        deltas = [a.log_price_delta for a in hit_high_then_up if a.log_price_delta is not None]
-        if deltas:
-            print(f"\n  Log(price) delta when threshold hit (CORRECT predictions):")
-            print(f"    Count:  {len(deltas)}")
-            print(f"    Min:    {min(deltas)*100:+.4f}%")
-            print(f"    Max:    {max(deltas)*100:+.4f}%")
-            print(f"    Mean:   {sum(deltas)/len(deltas)*100:+.4f}%")
-            sorted_deltas = sorted(deltas)
-            median = sorted_deltas[len(sorted_deltas)//2]
-            print(f"    Median: {median*100:+.4f}%")
-
-        # Time to threshold analysis (all resolved markets that hit high first)
-        resolved_high_markets = hit_high_then_up + hit_high_then_down
-        times_all = [(a.time_to_threshold, a.final_outcome == "up") for a in resolved_high_markets if a.time_to_threshold is not None]
-        times_correct = [a.time_to_threshold for a in hit_high_then_up if a.time_to_threshold is not None]
-        if times_correct:
-            print(f"\n  Time to threshold (CORRECT predictions):")
-            print(f"    Count:  {len(times_correct)}")
-            print(f"    Min:    {min(times_correct):.1f}s")
-            print(f"    Max:    {max(times_correct):.1f}s")
-            print(f"    Mean:   {sum(times_correct)/len(times_correct):.1f}s")
-            sorted_times = sorted(times_correct)
-            median = sorted_times[len(sorted_times)//2]
-            print(f"    Median: {median:.1f}s")
-            # Distribution buckets with success rate (0-3min, 3-6min, 6-9min, 9-12min, 12-15min)
-            buckets_correct = [0, 0, 0, 0, 0]
-            buckets_total = [0, 0, 0, 0, 0]
-            buckets_depth: list[list[float]] = [[], [], [], [], []]  # depths per bucket for correct predictions
-            for a in hit_high_then_up:
-                if a.time_to_threshold is not None:
-                    idx = min(int(a.time_to_threshold // 180), 4)
-                    buckets_correct[idx] += 1
-                    if a.threshold_depth is not None:
-                        buckets_depth[idx].append(a.threshold_depth)
-            for t, is_correct in times_all:
-                idx = min(int(t // 180), 4)
-                buckets_total[idx] += 1
-            print(f"    Distribution (with success rate and avg depth):")
-            for i, label in enumerate(["0-3min", "3-6min", "6-9min", "9-12min", "12-15min"]):
-                pct = buckets_correct[i]/len(times_correct)*100 if times_correct else 0
-                success_rate = buckets_correct[i]/buckets_total[i]*100 if buckets_total[i] > 0 else 0
-                avg_depth = sum(buckets_depth[i])/len(buckets_depth[i]) if buckets_depth[i] else 0
-                print(f"      {label:8s} {buckets_correct[i]:3d} ({pct:5.1f}%) | P(success): {success_rate:5.1f}% ({buckets_correct[i]}/{buckets_total[i]}) | Avg depth: {avg_depth:,.0f}")
-
-        # Log price delta for incorrectly predicted (hit high -> DOWN won)
-        deltas_wrong = [a.log_price_delta for a in hit_high_then_down if a.log_price_delta is not None]
-        if deltas_wrong:
-            print(f"\n  Log(price) delta when threshold hit (FAILED predictions):")
-            print(f"    Count:  {len(deltas_wrong)}")
-            print(f"    Min:    {min(deltas_wrong)*100:+.4f}%")
-            print(f"    Max:    {max(deltas_wrong)*100:+.4f}%")
-            print(f"    Mean:   {sum(deltas_wrong)/len(deltas_wrong)*100:+.4f}%")
-            sorted_deltas = sorted(deltas_wrong)
-            median = sorted_deltas[len(sorted_deltas)//2]
-            print(f"    Median: {median*100:+.4f}%")
-
-    print()
-
-    # Question 2: P(DOWN wins | hit low% first)
-    print(f"{'─' * 70}")
-    print(f"Q2: Markets that hit {low_pct:.0f}%- UP before hitting {high_pct:.0f}%+ UP")
-    print(f"{'─' * 70}")
-    print(f"  Total:           {len(hit_low_first)}")
-    print(f"  Then DOWN won:   {len(hit_low_then_down)}")
-    print(f"  Then UP won:     {len(hit_low_then_up)}")
-    if hit_low_first:
-        resolved_low = len(hit_low_then_down) + len(hit_low_then_up)
-        if resolved_low > 0:
-            prob = len(hit_low_then_down) / resolved_low * 100
-            print(f"\n  P(DOWN wins | hit {low_pct:.0f}% first) = {prob:.1f}%")
-            print(f"  (Based on {resolved_low} resolved markets)")
-
-            # Time from approach zone (threshold+5%) to threshold
-            approach_times_correct = [a.time_from_approach for a in hit_low_then_down if a.time_from_approach is not None]
-            approach_times_wrong = [a.time_from_approach for a in hit_low_then_up if a.time_from_approach is not None]
-            approach_times_all = approach_times_correct + approach_times_wrong
-            if approach_times_all:
-                print(f"\n  Time from {low_pct+5:.0f}% to {low_pct:.0f}% (approach -> threshold):")
-                print(f"    All:     mean={sum(approach_times_all)/len(approach_times_all):.1f}s, median={sorted(approach_times_all)[len(approach_times_all)//2]:.1f}s (n={len(approach_times_all)})")
-                if approach_times_correct:
-                    print(f"    Correct: mean={sum(approach_times_correct)/len(approach_times_correct):.1f}s, median={sorted(approach_times_correct)[len(approach_times_correct)//2]:.1f}s (n={len(approach_times_correct)})")
-                if approach_times_wrong:
-                    print(f"    Failed:  mean={sum(approach_times_wrong)/len(approach_times_wrong):.1f}s, median={sorted(approach_times_wrong)[len(approach_times_wrong)//2]:.1f}s (n={len(approach_times_wrong)})")
-
-        # Log price delta for correctly predicted (hit low -> DOWN won)
-        deltas = [a.log_price_delta for a in hit_low_then_down if a.log_price_delta is not None]
-        if deltas:
-            print(f"\n  Log(price) delta when threshold hit (CORRECT predictions):")
-            print(f"    Count:  {len(deltas)}")
-            print(f"    Min:    {min(deltas)*100:+.4f}%")
-            print(f"    Max:    {max(deltas)*100:+.4f}%")
-            print(f"    Mean:   {sum(deltas)/len(deltas)*100:+.4f}%")
-            sorted_deltas = sorted(deltas)
-            median = sorted_deltas[len(sorted_deltas)//2]
-            print(f"    Median: {median*100:+.4f}%")
-
-        # Time to threshold analysis (all resolved markets that hit low first)
-        resolved_low_markets = hit_low_then_down + hit_low_then_up
-        times_all = [(a.time_to_threshold, a.final_outcome == "down") for a in resolved_low_markets if a.time_to_threshold is not None]
-        times_correct = [a.time_to_threshold for a in hit_low_then_down if a.time_to_threshold is not None]
-        if times_correct:
-            print(f"\n  Time to threshold (CORRECT predictions):")
-            print(f"    Count:  {len(times_correct)}")
-            print(f"    Min:    {min(times_correct):.1f}s")
-            print(f"    Max:    {max(times_correct):.1f}s")
-            print(f"    Mean:   {sum(times_correct)/len(times_correct):.1f}s")
-            sorted_times = sorted(times_correct)
-            median = sorted_times[len(sorted_times)//2]
-            print(f"    Median: {median:.1f}s")
-            # Distribution buckets with success rate (0-3min, 3-6min, 6-9min, 9-12min, 12-15min)
-            buckets_correct = [0, 0, 0, 0, 0]
-            buckets_total = [0, 0, 0, 0, 0]
-            buckets_depth: list[list[float]] = [[], [], [], [], []]  # depths per bucket for correct predictions
-            for a in hit_low_then_down:
-                if a.time_to_threshold is not None:
-                    idx = min(int(a.time_to_threshold // 180), 4)
-                    buckets_correct[idx] += 1
-                    if a.threshold_depth is not None:
-                        buckets_depth[idx].append(a.threshold_depth)
-            for t, is_correct in times_all:
-                idx = min(int(t // 180), 4)
-                buckets_total[idx] += 1
-            print(f"    Distribution (with success rate and avg depth):")
-            for i, label in enumerate(["0-3min", "3-6min", "6-9min", "9-12min", "12-15min"]):
-                pct = buckets_correct[i]/len(times_correct)*100 if times_correct else 0
-                success_rate = buckets_correct[i]/buckets_total[i]*100 if buckets_total[i] > 0 else 0
-                avg_depth = sum(buckets_depth[i])/len(buckets_depth[i]) if buckets_depth[i] else 0
-                print(f"      {label:8s} {buckets_correct[i]:3d} ({pct:5.1f}%) | P(success): {success_rate:5.1f}% ({buckets_correct[i]}/{buckets_total[i]}) | Avg depth: {avg_depth:,.0f}")
-
-        # Log price delta for incorrectly predicted (hit low -> UP won)
-        deltas_wrong = [a.log_price_delta for a in hit_low_then_up if a.log_price_delta is not None]
-        if deltas_wrong:
-            print(f"\n  Log(price) delta when threshold hit (FAILED predictions):")
-            print(f"    Count:  {len(deltas_wrong)}")
-            print(f"    Min:    {min(deltas_wrong)*100:+.4f}%")
-            print(f"    Max:    {max(deltas_wrong)*100:+.4f}%")
-            print(f"    Mean:   {sum(deltas_wrong)/len(deltas_wrong)*100:+.4f}%")
-            sorted_deltas = sorted(deltas_wrong)
-            median = sorted_deltas[len(sorted_deltas)//2]
-            print(f"    Median: {median*100:+.4f}%")
-
-    print()
-
-    # Summary
-    print(f"{'─' * 70}")
-    print("SUMMARY")
-    print(f"{'─' * 70}")
-    print(f"  Markets never hitting {high_pct:.0f}% or {low_pct:.0f}%: {len(no_extreme)}")
-
-    # Show some example markets
-    if hit_high_first:
-        print(f"\n  Example markets that hit {high_pct:.0f}% first:")
-        for a in hit_high_first[:3]:
-            outcome = a.final_outcome or "unresolved"
-            print(f"    {a.market_id}: max={a.max_prob:.1%}, final={outcome}")
-
-    if hit_low_first:
-        print(f"\n  Example markets that hit {low_pct:.0f}% first:")
-        for a in hit_low_first[:3]:
-            outcome = a.final_outcome or "unresolved"
-            print(f"    {a.market_id}: min={a.min_prob:.1%}, final={outcome}")
-
-    print()
     return 0
 
 
