@@ -56,16 +56,43 @@ def query_snapshots(
         ts = float(get_val(b"ts")) if get_val(b"ts") != "N/A" else 0
         dt = datetime.fromtimestamp(ts, tz=timezone.utc) if ts else None
 
+        # Parse orderbook JSON to get best bid/ask
+        yes_bid, yes_ask, no_bid, no_ask = "N/A", "N/A", "N/A", "N/A"
+        orderbook_str = get_val(b"orderbook")
+        if orderbook_str != "N/A":
+            try:
+                ob = json.loads(orderbook_str)
+                # Best bid = highest price (last in sorted list)
+                # Best ask = lowest price (last in sorted list for asks)
+                yes_bids = ob.get("yes_bids", [])
+                yes_asks = ob.get("yes_asks", [])
+                no_bids = ob.get("no_bids", [])
+                no_asks = ob.get("no_asks", [])
+
+                if yes_bids:
+                    yes_bid = f"{max(b[0] for b in yes_bids):.4f}"
+                if yes_asks:
+                    yes_ask = f"{min(a[0] for a in yes_asks):.4f}"
+                if no_bids:
+                    no_bid = f"{max(b[0] for b in no_bids):.4f}"
+                if no_asks:
+                    no_ask = f"{min(a[0] for a in no_asks):.4f}"
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
+
         print(f"[{row_count}] {get_val(b'market_id')}")
         print(f"    Time:      {dt.strftime('%Y-%m-%d %H:%M:%S UTC') if dt else 'N/A'}")
         print(f"    Spot Price: ${float(get_val(b'spot_price')):,.2f}" if get_val(b"spot_price") != "N/A" else "    Spot Price: N/A")
-        print(f"    YES:       bid={get_val(b'yes_bid')} / ask={get_val(b'yes_ask')}")
-        print(f"    NO:        bid={get_val(b'no_bid')} / ask={get_val(b'no_ask')}")
+        print(f"    YES:       bid={yes_bid} / ask={yes_ask}")
+        print(f"    NO:        bid={no_bid} / ask={no_ask}")
 
-        if show_depth and b"depth_json" in cells:
-            depth = json.loads(get_val(b"depth_json"))
-            print(f"    Depth YES: {len(depth.get('yes_bids', []))} bids, {len(depth.get('yes_asks', []))} asks")
-            print(f"    Depth NO:  {len(depth.get('no_bids', []))} bids, {len(depth.get('no_asks', []))} asks")
+        if show_depth and orderbook_str != "N/A":
+            try:
+                ob = json.loads(orderbook_str)
+                print(f"    Depth YES: {len(ob.get('yes_bids', []))} bids, {len(ob.get('yes_asks', []))} asks")
+                print(f"    Depth NO:  {len(ob.get('no_bids', []))} bids, {len(ob.get('no_asks', []))} asks")
+            except (json.JSONDecodeError, KeyError):
+                pass
 
         print()
 
