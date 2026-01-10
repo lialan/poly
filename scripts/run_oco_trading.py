@@ -370,30 +370,30 @@ async def monitor_and_trade(
     print(f"    UP token:   0x{int(market.up_token_id):064x}"[:24] + "...")
     print(f"    DOWN token: 0x{int(market.down_token_id):064x}"[:24] + "...")
 
-    # Calculate resolution time
-    resolution_time = None
-    try:
-        resolution_ts = slug_to_timestamp(market.slug)
-        resolution_time = datetime.fromtimestamp(resolution_ts, tz=timezone.utc)
-        time_remaining = (resolution_time - datetime.now(timezone.utc)).total_seconds()
-        print(f"    Resolves at: {resolution_time.strftime('%H:%M:%S UTC')} ({time_remaining:.0f}s remaining)")
-    except Exception:
-        pass
+    # Use synchronized time if available, otherwise fall back to local time
+    def get_now_ms() -> int:
+        return time_sync.now_ms() if time_sync else int(time.time() * 1000)
+
+    # Calculate epoch timing
+    resolution_ts = slug_to_timestamp(market.slug) or int(time.time())
+    epoch_duration_sec = horizon.value  # M15=900, H1=3600, etc.
+    epoch_start_ms = (resolution_ts - epoch_duration_sec) * 1000
+    epoch_end_ms = resolution_ts * 1000
+    resolution_time = datetime.fromtimestamp(resolution_ts, tz=timezone.utc)
+
+    now_ms = get_now_ms()
+    time_remaining = (epoch_end_ms - now_ms) // 1000
+    print(f"    Resolves at: {resolution_time.strftime('%H:%M:%S UTC')} ({time_remaining}s remaining)")
+
+    # Check if epoch already ended
+    if now_ms >= epoch_end_ms:
+        print(f"    [SKIP] Epoch already ended, moving to next...")
+        return {"market_slug": market.slug, "success": False, "epoch_ended": True}
 
     # Initialize state
     result: dict = {"market_slug": market.slug, "success": False}
     threshold_decimal = Decimal(str(threshold))
     trigger_level = threshold_decimal - Decimal("0.01")
-
-    # Use synchronized time if available, otherwise fall back to local time
-    def get_now_ms() -> int:
-        return time_sync.now_ms() if time_sync else int(time.time() * 1000)
-
-    # slug_to_timestamp returns resolution time (epoch end)
-    resolution_ts = slug_to_timestamp(market.slug) or int(time.time())
-    epoch_duration_sec = horizon.value  # M15=900, H1=3600, etc.
-    epoch_start_ms = (resolution_ts - epoch_duration_sec) * 1000
-    epoch_end_ms = resolution_ts * 1000
     price_state = {"btc": PriceState(), "eth": PriceState()}
     triggered = asyncio.Event()
     epoch_ended = asyncio.Event()  # Set when epoch ends without trigger
