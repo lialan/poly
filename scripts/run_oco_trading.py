@@ -667,21 +667,49 @@ async def main() -> int:
             if not loop_mode:
                 break
 
-            # Wait for next epoch
+            # Wait for next epoch with live price monitoring
             next_epoch_ts = get_slot_timestamp(horizon, 1)
             wait_seconds = next_epoch_ts - int(time.time())
             if wait_seconds > 0:
                 next_time = datetime.fromtimestamp(next_epoch_ts, tz=timezone.utc)
                 print(f"\n[NEXT EPOCH] Waiting {wait_seconds}s until {next_time.strftime('%H:%M:%S UTC')}...")
-                print(f"             Stats: {wins}W / {losses}L / {epoch_count} epochs")
+                print(f"             Stats: {wins}W / {losses}L / {epoch_count} epochs\n")
+
+                # Start Binance WebSocket for price monitoring during wait
+                price_state = PriceState()
+
+                def on_kline(kline):
+                    price_state.open_price = float(kline.open)
+                    price_state.close_price = float(kline.close)
+                    price_state.kline_start_ms = kline.start_time
+                    price_state.kline_close_ms = kline.close_time
+                    price_state.update_time_ms = time_sync.now_ms() if time_sync else int(time.time() * 1000)
+
+                    remaining = next_epoch_ts - int(time.time())
+                    spot_str = price_state.format_display()
+                    kline_pct = price_state.format_time_info()
+                    print(f"  [WAIT][{remaining:4d}s|{kline_pct:>3}] {spot_str}      ", end="\r")
+
+                binance_symbol = BTCUSDT if asset == Asset.BTC else ETHUSDT
+                binance_stream = BinanceKlineStream(symbol=binance_symbol, interval=INTERVAL_1M, on_kline=on_kline)
+                binance_task = asyncio.create_task(binance_stream.start())
+
                 try:
                     while wait_seconds > 0:
-                        await asyncio.sleep(min(wait_seconds, 30))
-                        wait_seconds -= 30
-                        if wait_seconds > 0:
-                            print(f"             {wait_seconds}s remaining...", end="\r")
+                        await asyncio.sleep(1)
+                        wait_seconds = next_epoch_ts - int(time.time())
                 except (asyncio.CancelledError, KeyboardInterrupt):
+                    await binance_stream.stop()
+                    binance_task.cancel()
                     break
+                finally:
+                    await binance_stream.stop()
+                    binance_task.cancel()
+                    try:
+                        await binance_task
+                    except asyncio.CancelledError:
+                        pass
+                print()  # Clear the line
 
     except KeyboardInterrupt:
         print("\n\n[EXIT] User interrupted.")
