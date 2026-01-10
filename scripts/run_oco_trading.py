@@ -292,7 +292,10 @@ def print_epoch_result(result: dict):
     print("EPOCH RESULT")
     print("=" * 60)
 
-    if result.get("success"):
+    if result.get("epoch_ended"):
+        print(f"\n  Market:     {result.get('market_slug', 'N/A')}")
+        print(f"  Status:     No trigger - epoch ended")
+    elif result.get("success"):
         print(f"\n  Side:       {result.get('triggered_side', 'N/A')}")
         print(f"  Market:     {result.get('market_slug', 'N/A')}")
         print(f"  Trigger:    {result.get('trigger_price', 0):.3f}")
@@ -386,10 +389,14 @@ async def monitor_and_trade(
     def get_now_ms() -> int:
         return time_sync.now_ms() if time_sync else int(time.time() * 1000)
 
-    epoch_start_ts = slug_to_timestamp(market.slug) or int(time.time())
-    epoch_start_ms = epoch_start_ts * 1000
+    # slug_to_timestamp returns resolution time (epoch end)
+    resolution_ts = slug_to_timestamp(market.slug) or int(time.time())
+    epoch_duration_sec = horizon.value  # M15=900, H1=3600, etc.
+    epoch_start_ms = (resolution_ts - epoch_duration_sec) * 1000
+    epoch_end_ms = resolution_ts * 1000
     price_state = {"btc": PriceState(), "eth": PriceState()}
     triggered = asyncio.Event()
+    epoch_ended = asyncio.Event()  # Set when epoch ends without trigger
     order_placed = asyncio.Event()  # For post-bet monitoring
     trigger_info: Optional[TriggerInfo] = None
 
@@ -413,17 +420,24 @@ async def monitor_and_trade(
         up_price, down_price = state.yes_mid, state.no_mid
         now_ms = get_now_ms()
         elapsed = (now_ms - epoch_start_ms) // 1000
+        remaining = (epoch_end_ms - now_ms) // 1000
         ps = price_state["btc"] if asset == Asset.BTC else price_state["eth"]
         spot_str = ps.format_display()
         delta = ps.log_delta_pct
         kline_pct = ps.format_time_info()
 
+        # Check if epoch has ended
+        if now_ms >= epoch_end_ms and not triggered.is_set() and not epoch_ended.is_set():
+            print(f"\n\n[EPOCH END] Market resolved without trigger (elapsed: {elapsed}s)")
+            epoch_ended.set()
+            return
+
         # Display status (continues even after order placed)
         prefix = "[POST]" if order_placed.is_set() else ""
-        status = f"  {prefix}[{elapsed:4d}s|{kline_pct:>3}] {spot_str} | UP: {float(up_price):.3f} | DOWN: {float(down_price):.3f}"
+        status = f"  {prefix}[{elapsed:4d}s/{remaining:4d}s|{kline_pct:>3}] {spot_str} | UP: {float(up_price):.3f} | DOWN: {float(down_price):.3f}"
 
-        if triggered.is_set():
-            # After trigger, just show status for study
+        if triggered.is_set() or epoch_ended.is_set():
+            # After trigger or epoch end, just show status for study
             print(status + "      ", end="\r")
             return
 
@@ -474,23 +488,45 @@ async def monitor_and_trade(
     binance_task = asyncio.create_task(binance_stream.start())
 
     try:
-        await triggered.wait()
-        trigger_info.print_details(threshold)
+        # Wait for either trigger OR epoch end
+        trigger_task = asyncio.create_task(triggered.wait())
+        epoch_end_task = asyncio.create_task(epoch_ended.wait())
 
-        # Place order (real or simulated)
-        result["triggered_side"] = trigger_info.side
-        result["trigger_price"] = trigger_info.trigger_price
+        done, pending = await asyncio.wait(
+            [trigger_task, epoch_end_task],
+            return_when=asyncio.FIRST_COMPLETED
+        )
 
-        if dry_run:
-            print(f"\n[3] [DRY RUN] Would place BUY {trigger_info.side} order at {trigger_info.trigger_price + 0.01:.3f}")
-            result.update({"success": True, "order_id": "dry_run"})
-        else:
-            order_result = await place_order_and_check(api, trigger_info.token_id,
-                                                        trigger_info.trigger_price, size, trigger_info.side)
-            result.update(order_result)
+        # Cancel pending tasks
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
-        if result.get("success"):
-            order_placed.set()
+        # Check if epoch ended without trigger
+        if epoch_ended.is_set() and not triggered.is_set():
+            result["epoch_ended"] = True
+            # Continue to finally block to clean up
+
+        elif triggered.is_set():
+            trigger_info.print_details(threshold)
+
+            # Place order (real or simulated)
+            result["triggered_side"] = trigger_info.side
+            result["trigger_price"] = trigger_info.trigger_price
+
+            if dry_run:
+                print(f"\n[3] [DRY RUN] Would place BUY {trigger_info.side} order at {trigger_info.trigger_price + 0.01:.3f}")
+                result.update({"success": True, "order_id": "dry_run"})
+            else:
+                order_result = await place_order_and_check(api, trigger_info.token_id,
+                                                            trigger_info.trigger_price, size, trigger_info.side)
+                result.update(order_result)
+
+            if result.get("success"):
+                order_placed.set()
 
         # Wait for resolution (feeds keep running for study)
         if result.get("success") and wait_for_resolution_flag and resolution_time:
