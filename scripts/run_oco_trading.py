@@ -57,6 +57,8 @@ from poly import (
     slug_to_timestamp,
 )
 from poly.api.binance_ws import BinanceKlineStream, BTCUSDT, ETHUSDT, INTERVAL_1M
+from poly.api.binance import get_kline_at_time
+from poly.storage.bigtable import BigtableWriter, TABLE_BTC_15M, TABLE_ETH_15M
 
 
 class TimeSync:
@@ -138,17 +140,18 @@ ERC20_ABI = [
 @dataclass
 class PriceState:
     """Current price state from Binance with timestamp alignment."""
-    open_price: Optional[float] = None
-    close_price: Optional[float] = None
+    open_price: Optional[float] = None  # Current 1m kline open (for kline progress)
+    close_price: Optional[float] = None  # Current price
     kline_start_ms: Optional[int] = None  # Kline open time (Binance server time)
     kline_close_ms: Optional[int] = None  # Kline close time (Binance server time)
     update_time_ms: Optional[int] = None  # When we received this update (synced time)
+    epoch_open_price: Optional[float] = None  # Price at epoch start (for delta calc)
 
     @property
     def log_delta_pct(self) -> Optional[float]:
-        """Calculate log return as percentage."""
-        if self.open_price and self.close_price and self.open_price > 0:
-            return (math.log(self.close_price) - math.log(self.open_price)) * 100
+        """Calculate log return from epoch open to current price as percentage."""
+        if self.epoch_open_price and self.close_price and self.epoch_open_price > 0:
+            return (math.log(self.close_price) - math.log(self.epoch_open_price)) * 100
         return None
 
     @property
@@ -193,23 +196,22 @@ class TriggerInfo:
     trigger_price: float
     elapsed_seconds: int
     spot_price: Optional[float]
-    spot_open: Optional[float]
-    log_delta_pct: Optional[float]
+    epoch_open: Optional[float]  # Price at epoch start
+    log_delta_pct: Optional[float]  # Delta from epoch open to current
     up_bid: Optional[float]
     up_ask: Optional[float]
     down_bid: Optional[float]
     down_ask: Optional[float]
-    kline_progress_pct: Optional[float] = None  # Progress through current 1m kline
+    epoch_progress_pct: Optional[float] = None  # Progress through epoch (0-100%)
     trigger_time_ms: Optional[int] = None  # Synchronized trigger timestamp
 
     def print_details(self, threshold: float):
         """Print trigger details."""
         print(f"\n\n[TRIGGER] {self.side} reached {self.trigger_price:.3f} >= {threshold - 0.01:.2f}!")
-        print(f"    Epoch time:  {self.elapsed_seconds}s")
+        print(f"    Epoch time:  {self.elapsed_seconds}s ({self.epoch_progress_pct:.0f}% of epoch)" if self.epoch_progress_pct else f"    Epoch time:  {self.elapsed_seconds}s")
 
         if self.spot_price and self.log_delta_pct is not None:
-            kline_str = f", kline: {self.kline_progress_pct:.0f}%" if self.kline_progress_pct else ""
-            print(f"    Spot price:  ${self.spot_price:,.2f} (open: ${self.spot_open:,.2f}, delta: {self.log_delta_pct:+.3f}%{kline_str})")
+            print(f"    Spot price:  ${self.spot_price:,.2f} (epoch open: ${self.epoch_open:,.2f}, delta: {self.log_delta_pct:+.3f}%)")
         elif self.spot_price:
             print(f"    Spot price:  ${self.spot_price:,.2f}")
         else:
@@ -225,6 +227,54 @@ class TriggerInfo:
         down_ask_str = f"{self.down_ask:.3f}" if self.down_ask else "-"
         print(f"    UP:   bid={up_bid_str} ask={up_ask_str}")
         print(f"    DOWN: bid={down_bid_str} ask={down_ask_str}")
+
+
+async def fetch_epoch_open_price(
+    asset: Asset,
+    epoch_start_ms: int,
+    binance_symbol: str,
+) -> tuple[Optional[float], str]:
+    """Fetch epoch open price from Binance, falling back to Bigtable.
+
+    Args:
+        asset: Asset (BTC or ETH)
+        epoch_start_ms: Epoch start timestamp in milliseconds
+        binance_symbol: Binance symbol (BTCUSDT or ETHUSDT)
+
+    Returns:
+        Tuple of (price, source) where source is "binance" or "bigtable"
+    """
+    # Try Binance first
+    try:
+        epoch_kline = await get_kline_at_time(binance_symbol, INTERVAL_1M, epoch_start_ms)
+        if epoch_kline:
+            return float(epoch_kline.open), "binance"
+    except Exception as e:
+        print(f"    [WARN] Binance fetch failed: {e}")
+
+    # Fallback to Bigtable
+    try:
+        table_name = TABLE_BTC_15M if asset == Asset.BTC else TABLE_ETH_15M
+        epoch_start_sec = epoch_start_ms / 1000
+
+        with BigtableWriter() as bt:
+            # Query snapshots around epoch start (within 60 seconds)
+            snapshots = bt.get_snapshots(
+                start_ts=epoch_start_sec - 5,
+                end_ts=epoch_start_sec + 60,
+                limit=10,
+                table_name=table_name,
+            )
+
+            if snapshots:
+                # Find the snapshot closest to epoch start
+                closest = min(snapshots, key=lambda s: abs(s["ts"] - epoch_start_sec))
+                if closest.get("spot_price"):
+                    return float(closest["spot_price"]), "bigtable"
+    except Exception as e:
+        print(f"    [WARN] Bigtable fetch failed: {e}")
+
+    return None, "none"
 
 
 def parse_args():
@@ -292,7 +342,14 @@ def print_epoch_result(result: dict):
     print("EPOCH RESULT")
     print("=" * 60)
 
-    if result.get("epoch_ended"):
+    if result.get("monitor_only"):
+        print(f"\n  Market:     {result.get('market_slug', 'N/A')}")
+        print(f"  Mode:       Monitor only (joined mid-epoch)")
+        if result.get("trigger_observed"):
+            print(f"  Trigger:    {result.get('observed_trigger_side')} at {result.get('observed_trigger_price', 0):.3f} (not executed)")
+        else:
+            print(f"  Status:     No trigger observed")
+    elif result.get("epoch_ended"):
         print(f"\n  Market:     {result.get('market_slug', 'N/A')}")
         print(f"  Status:     No trigger - epoch ended")
     elif result.get("success"):
@@ -375,23 +432,35 @@ async def monitor_and_trade(
         return time_sync.now_ms() if time_sync else int(time.time() * 1000)
 
     # Calculate epoch timing
-    resolution_ts = slug_to_timestamp(market.slug) or int(time.time())
+    # NOTE: slug_to_timestamp() returns the EPOCH START time, not the resolution time
+    # The market resolves at epoch_start + horizon.value
+    epoch_start_ts = slug_to_timestamp(market.slug) or int(time.time())
     epoch_duration_sec = horizon.value  # M15=900, H1=3600, etc.
-    epoch_start_ms = (resolution_ts - epoch_duration_sec) * 1000
-    epoch_end_ms = resolution_ts * 1000
+    epoch_start_ms = epoch_start_ts * 1000
+    epoch_end_ms = (epoch_start_ts + epoch_duration_sec) * 1000  # Resolution time
+    resolution_ts = epoch_start_ts + epoch_duration_sec
     resolution_time = datetime.fromtimestamp(resolution_ts, tz=timezone.utc)
 
     now_ms = get_now_ms()
+    elapsed_sec = (now_ms - epoch_start_ms) // 1000
     time_remaining = (epoch_end_ms - now_ms) // 1000
     print(f"    Resolves at: {resolution_time.strftime('%H:%M:%S UTC')} ({time_remaining}s remaining)")
 
-    # Check if epoch already ended
+    # Check if epoch already ended - need to fetch next epoch
     if now_ms >= epoch_end_ms:
-        print(f"    [SKIP] Epoch already ended, moving to next...")
+        print(f"    [SKIP] Epoch already resolved, fetching next...")
         return {"market_slug": market.slug, "success": False, "epoch_ended": True}
 
+    # Check if we're joining mid-epoch (more than 30s into the epoch)
+    # In this case, we monitor but don't place bets
+    # This threshold matches EPOCH_START_GRACE_SEC in the main loop
+    EPOCH_START_GRACE_SEC = 30
+    monitor_only = elapsed_sec > EPOCH_START_GRACE_SEC
+    if monitor_only:
+        print(f"    [MONITOR ONLY] Joined mid-epoch ({elapsed_sec}s elapsed), will not place bets")
+
     # Initialize state
-    result: dict = {"market_slug": market.slug, "success": False}
+    result: dict = {"market_slug": market.slug, "success": False, "monitor_only": monitor_only}
     threshold_decimal = Decimal(str(threshold))
     trigger_level = threshold_decimal - Decimal("0.01")
     price_state = {"btc": PriceState(), "eth": PriceState()}
@@ -399,6 +468,18 @@ async def monitor_and_trade(
     epoch_ended = asyncio.Event()  # Set when epoch ends without trigger
     order_placed = asyncio.Event()  # For post-bet monitoring
     trigger_info: Optional[TriggerInfo] = None
+    trigger_would_fire = asyncio.Event()  # For monitor-only mode logging
+
+    # Fetch epoch open price for delta calculation (Binance with Bigtable fallback)
+    binance_symbol = BTCUSDT if asset == Asset.BTC else ETHUSDT
+    asset_key = "btc" if asset == Asset.BTC else "eth"
+    epoch_open_price, price_source = await fetch_epoch_open_price(asset, epoch_start_ms, binance_symbol)
+    if epoch_open_price:
+        price_state[asset_key].epoch_open_price = epoch_open_price
+        epoch_start_time = datetime.fromtimestamp(epoch_start_ms / 1000, tz=timezone.utc)
+        print(f"    Epoch open: ${epoch_open_price:,.2f} (from {epoch_start_time.strftime('%H:%M:%S')} UTC, source: {price_source})")
+    else:
+        print(f"    [WARN] Could not fetch epoch open price from Binance or Bigtable")
 
     def on_binance_kline(kline):
         """Update price state with kline data including timestamps."""
@@ -424,7 +505,9 @@ async def monitor_and_trade(
         ps = price_state["btc"] if asset == Asset.BTC else price_state["eth"]
         spot_str = ps.format_display()
         delta = ps.log_delta_pct
-        kline_pct = ps.format_time_info()
+        # Show epoch progress instead of kline progress
+        epoch_progress_pct = (elapsed / epoch_duration_sec) * 100 if epoch_duration_sec > 0 else 0
+        epoch_pct_str = f"{epoch_progress_pct:.0f}%"
 
         # Check if epoch has ended
         if now_ms >= epoch_end_ms and not triggered.is_set() and not epoch_ended.is_set():
@@ -433,11 +516,16 @@ async def monitor_and_trade(
             return
 
         # Display status (continues even after order placed)
-        prefix = "[POST]" if order_placed.is_set() else ""
+        if order_placed.is_set():
+            prefix = "[POST]"
+        elif monitor_only:
+            prefix = "[MON]"
+        else:
+            prefix = ""
         now_ts = now_ms // 1000
-        status = f"  {prefix}[{now_ts}][{resolution_ts}][{elapsed:4d}s/{remaining:4d}s|{kline_pct:>3}] {spot_str} | UP: {float(up_price):.3f} | DOWN: {float(down_price):.3f}"
+        status = f"  {prefix}[{now_ts}][{resolution_ts}][{elapsed:4d}s/{remaining:4d}s|{epoch_pct_str:>3}] {spot_str} | UP: {float(up_price):.3f} | DOWN: {float(down_price):.3f}"
 
-        if triggered.is_set() or epoch_ended.is_set():
+        if triggered.is_set() or epoch_ended.is_set() or trigger_would_fire.is_set():
             # After trigger or epoch end, just show status for study
             print(status + "      ", end="\r")
             return
@@ -461,16 +549,23 @@ async def monitor_and_trade(
 
             trigger_info = TriggerInfo(
                 side=side, token_id=token_id, trigger_price=price,
-                elapsed_seconds=elapsed, spot_price=ps.close_price, spot_open=ps.open_price,
+                elapsed_seconds=elapsed, spot_price=ps.close_price, epoch_open=ps.epoch_open_price,
                 log_delta_pct=delta,
                 up_bid=float(state.yes_bid) if state.yes_bid else None,
                 up_ask=float(state.yes_ask) if state.yes_ask else None,
                 down_bid=float(state.no_bid) if state.no_bid else None,
                 down_ask=float(state.no_ask) if state.no_ask else None,
-                kline_progress_pct=ps.kline_progress_pct,
+                epoch_progress_pct=epoch_progress_pct,
                 trigger_time_ms=now_ms,
             )
-            triggered.set()
+
+            if monitor_only:
+                # In monitor-only mode, log the trigger but don't place order
+                if not trigger_would_fire.is_set():
+                    print(f"\n\n[TRIGGER DETECTED] {side} at {price:.3f} (monitor-only, no order placed)")
+                    trigger_would_fire.set()
+            else:
+                triggered.set()
 
     # Setup WebSocket feeds
     feed = MarketFeed(on_update=on_update,
@@ -478,7 +573,6 @@ async def monitor_and_trade(
                       on_disconnect=lambda: print("\n    [WS] Reconnecting...") if not triggered.is_set() else None)
     await feed.add_market(market.slug, market.up_token_id, market.down_token_id)
 
-    binance_symbol = BTCUSDT if asset == Asset.BTC else ETHUSDT
     binance_stream = BinanceKlineStream(symbol=binance_symbol, interval=INTERVAL_1M, on_kline=on_binance_kline)
 
     print(f"\n[2] Monitoring prices (WebSocket)...")
@@ -489,29 +583,42 @@ async def monitor_and_trade(
     binance_task = asyncio.create_task(binance_stream.start())
 
     try:
-        # Wait for either trigger OR epoch end
-        trigger_task = asyncio.create_task(triggered.wait())
-        epoch_end_task = asyncio.create_task(epoch_ended.wait())
+        if monitor_only:
+            # In monitor-only mode, just wait for epoch to end
+            print(f"\n[2] Monitoring prices (WebSocket) - MONITOR ONLY MODE")
+            print(f"    Will observe market until epoch ends")
+            print("    Press Ctrl+C to cancel\n")
 
-        done, pending = await asyncio.wait(
-            [trigger_task, epoch_end_task],
-            return_when=asyncio.FIRST_COMPLETED
-        )
-
-        # Cancel pending tasks
-        for task in pending:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-        # Check if epoch ended without trigger
-        if epoch_ended.is_set() and not triggered.is_set():
+            await epoch_ended.wait()
             result["epoch_ended"] = True
-            # Continue to finally block to clean up
+            result["trigger_observed"] = trigger_would_fire.is_set()
+            if trigger_would_fire.is_set() and trigger_info:
+                result["observed_trigger_side"] = trigger_info.side
+                result["observed_trigger_price"] = trigger_info.trigger_price
+        else:
+            # Normal mode: wait for either trigger OR epoch end
+            trigger_task = asyncio.create_task(triggered.wait())
+            epoch_end_task = asyncio.create_task(epoch_ended.wait())
 
-        elif triggered.is_set():
+            done, pending = await asyncio.wait(
+                [trigger_task, epoch_end_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+
+            # Cancel pending tasks
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+            # Check if epoch ended without trigger
+            if epoch_ended.is_set() and not triggered.is_set():
+                result["epoch_ended"] = True
+                # Continue to finally block to clean up
+
+        if triggered.is_set():
             trigger_info.print_details(threshold)
 
             # Place order (real or simulated)
@@ -664,7 +771,7 @@ async def main() -> int:
             print(f"\n[ERROR] Failed to load config: {e}")
             return 1
 
-    epoch_count, wins, losses = 0, 0, 0
+    epoch_count, wins, losses, monitor_only_count = 0, 0, 0, 0
 
     try:
         while True:
@@ -691,7 +798,9 @@ async def main() -> int:
                     ignore_first_seconds=args.ignore_first_seconds, min_delta_pct=args.min_delta,
                     time_sync=time_sync,
                 )
-                if result.get("won") is True:
+                if result.get("monitor_only"):
+                    monitor_only_count += 1
+                elif result.get("won") is True:
                     wins += 1
                 elif result.get("won") is False:
                     losses += 1
@@ -704,13 +813,27 @@ async def main() -> int:
             if not loop_mode:
                 break
 
+            # Check if we should enter current epoch or wait for next
+            # Grace period: if within 30s of epoch start, enter immediately
+            EPOCH_START_GRACE_SEC = 30
+            current_epoch_start = get_slot_timestamp(horizon, 0)
+            elapsed_in_current = int(time.time()) - current_epoch_start
+
+            if elapsed_in_current < EPOCH_START_GRACE_SEC:
+                # We're at the beginning of a new epoch, enter immediately
+                print(f"\n[NEXT EPOCH] Starting immediately ({elapsed_in_current}s into new epoch)")
+                continue
+
             # Wait for next epoch with live price monitoring
             next_epoch_ts = get_slot_timestamp(horizon, 1)
             wait_seconds = next_epoch_ts - int(time.time())
             if wait_seconds > 0:
                 next_time = datetime.fromtimestamp(next_epoch_ts, tz=timezone.utc)
                 print(f"\n[NEXT EPOCH] Waiting {wait_seconds}s until {next_time.strftime('%H:%M:%S UTC')}...")
-                print(f"             Stats: {wins}W / {losses}L / {epoch_count} epochs\n")
+                stats_str = f"{wins}W / {losses}L"
+                if monitor_only_count > 0:
+                    stats_str += f" / {monitor_only_count} observed"
+                print(f"             Stats: {stats_str} / {epoch_count} epochs\n")
 
                 # Start Binance WebSocket for price monitoring during wait
                 price_state = PriceState()
@@ -759,6 +882,8 @@ async def main() -> int:
     print(f"\n  Epochs:     {epoch_count}")
     print(f"  Wins:       {wins}")
     print(f"  Losses:     {losses}")
+    if monitor_only_count > 0:
+        print(f"  Observed:   {monitor_only_count} (joined mid-epoch)")
     if wins + losses > 0:
         print(f"  Win rate:   {wins / (wins + losses) * 100:.1f}%")
 
