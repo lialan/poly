@@ -434,7 +434,8 @@ async def monitor_and_trade(
 
         # Display status (continues even after order placed)
         prefix = "[POST]" if order_placed.is_set() else ""
-        status = f"  {prefix}[{resolution_ts}][{elapsed:4d}s/{remaining:4d}s|{kline_pct:>3}] {spot_str} | UP: {float(up_price):.3f} | DOWN: {float(down_price):.3f}"
+        now_ts = now_ms // 1000
+        status = f"  {prefix}[{now_ts}][{resolution_ts}][{elapsed:4d}s/{remaining:4d}s|{kline_pct:>3}] {spot_str} | UP: {float(up_price):.3f} | DOWN: {float(down_price):.3f}"
 
         if triggered.is_set() or epoch_ended.is_set():
             # After trigger or epoch end, just show status for study
@@ -721,10 +722,11 @@ async def main() -> int:
                     price_state.kline_close_ms = kline.close_time
                     price_state.update_time_ms = time_sync.now_ms() if time_sync else int(time.time() * 1000)
 
-                    remaining = next_epoch_ts - int(time.time())
+                    now_ts = time_sync.now_ms() // 1000 if time_sync else int(time.time())
+                    remaining = next_epoch_ts - now_ts
                     spot_str = price_state.format_display()
                     kline_pct = price_state.format_time_info()
-                    print(f"  [WAIT][{next_epoch_ts}][{remaining:4d}s|{kline_pct:>3}] {spot_str}      ", end="\r")
+                    print(f"  [WAIT][{now_ts}][{next_epoch_ts}][{remaining:4d}s|{kline_pct:>3}] {spot_str}      ", end="\r")
 
                 binance_symbol = BTCUSDT if asset == Asset.BTC else ETHUSDT
                 binance_stream = BinanceKlineStream(symbol=binance_symbol, interval=INTERVAL_1M, on_kline=on_kline)
