@@ -1,0 +1,4 @@
+ccxt>=4.0.0
+aiohttp>=3.9.0
+websockets>=12.0
+google-cloud-bigtable>=2.21.0
